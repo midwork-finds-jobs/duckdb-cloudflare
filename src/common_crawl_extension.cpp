@@ -12,6 +12,7 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/database.hpp"
@@ -624,6 +625,27 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 	output.SetCardinality(output_offset);
 }
 
+// Helper function to convert SQL LIKE wildcards to CDX API wildcards
+static string ConvertSQLWildcardsToCDX(const string &pattern) {
+	string result;
+	result.reserve(pattern.length());
+
+	for (char ch : pattern) {
+		if (ch == '%') {
+			// SQL % (zero or more chars) -> CDX * (zero or more chars)
+			result += '*';
+		} else if (ch == '_') {
+			// SQL _ (single char) -> CDX ? (single char, if supported)
+			// Note: CDX API may not support ?, but we'll convert it anyway
+			result += '?';
+		} else {
+			result += ch;
+		}
+	}
+
+	return result;
+}
+
 // Filter pushdown function to handle WHERE clauses
 static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                vector<unique_ptr<Expression>> &filters) {
@@ -642,6 +664,58 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 	for (idx_t i = 0; i < filters.size(); i++) {
 		auto &filter = filters[i];
+		fprintf(stderr, "[DEBUG] Filter %lu: class=%d\n", (unsigned long)i, (int)filter->GetExpressionClass());
+
+		// Handle BOUND_FUNCTION for LIKE expressions
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+			auto &func = filter->Cast<BoundFunctionExpression>();
+			fprintf(stderr, "[DEBUG] Function name: %s\n", func.function.name.c_str());
+
+			// Check if this is a CONTAINS function (DuckDB optimizes LIKE '%string%' to contains)
+			if (func.function.name == "contains") {
+				// CONTAINS has 2 children: column and search string
+				if (func.children.size() >= 2 &&
+				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+					string column_name = col_ref.GetName();
+
+					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string search_string = constant.value.ToString();
+						fprintf(stderr, "[DEBUG] CONTAINS URL filter search string: '%s'\n", search_string.c_str());
+						// Convert to CDX wildcard pattern: *search_string*
+						bind_data.url_filter = "*" + search_string + "*";
+						fprintf(stderr, "[DEBUG] CONTAINS URL filter pattern: '%s'\n", bind_data.url_filter.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+			// Check if this is a LIKE function
+			else if (func.function.name == "like" || func.function.name == "~~") {
+				// LIKE has 2 children: column and pattern
+				if (func.children.size() >= 2 &&
+				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+					string column_name = col_ref.GetName();
+
+					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string original_pattern = constant.value.ToString();
+						fprintf(stderr, "[DEBUG] LIKE URL filter original pattern: '%s'\n", original_pattern.c_str());
+						// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
+						bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
+						fprintf(stderr, "[DEBUG] LIKE URL filter converted pattern: '%s'\n", bind_data.url_filter.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+		}
 
 		// Check if this is a comparison expression
 		if (filter->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
@@ -679,7 +753,11 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 		// Handle URL filtering (special case - uses url parameter)
 		if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			bind_data.url_filter = constant.value.ToString();
+			string original_pattern = constant.value.ToString();
+			fprintf(stderr, "[DEBUG] URL filter original pattern: '%s'\n", original_pattern.c_str());
+			// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
+			bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
+			fprintf(stderr, "[DEBUG] URL filter converted pattern: '%s'\n", bind_data.url_filter.c_str());
 			filters_to_remove.push_back(i);
 		}
 		// Handle status_code filtering (uses CDX filter parameter)
