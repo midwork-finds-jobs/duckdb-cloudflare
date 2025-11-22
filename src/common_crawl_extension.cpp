@@ -20,6 +20,9 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/gzip_file_system.hpp"
+#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/time.hpp"
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
@@ -445,7 +448,7 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	bind_data->fields_needed.push_back("url");
 
 	names.push_back("timestamp");
-	return_types.push_back(LogicalType::VARCHAR);
+	return_types.push_back(LogicalType::TIMESTAMP);
 	bind_data->fields_needed.push_back("timestamp");
 
 	names.push_back("mime_type");
@@ -555,6 +558,29 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	return std::move(state);
 }
 
+// Helper function to parse CDX timestamp format (YYYYMMDDHHmmss) to DuckDB timestamp
+static timestamp_t ParseCDXTimestamp(const string &cdx_timestamp) {
+	if (cdx_timestamp.length() != 14) {
+		return timestamp_t(0); // Return epoch if invalid format
+	}
+
+	try {
+		int32_t year = std::stoi(cdx_timestamp.substr(0, 4));
+		int32_t month = std::stoi(cdx_timestamp.substr(4, 2));
+		int32_t day = std::stoi(cdx_timestamp.substr(6, 2));
+		int32_t hour = std::stoi(cdx_timestamp.substr(8, 2));
+		int32_t minute = std::stoi(cdx_timestamp.substr(10, 2));
+		int32_t second = std::stoi(cdx_timestamp.substr(12, 2));
+
+		// Use DuckDB's Timestamp::FromDatetime to create timestamp
+		date_t date = Date::FromDate(year, month, day);
+		dtime_t time = Time::FromTime(hour, minute, second, 0);
+		return Timestamp::FromDatetime(date, time);
+	} catch (...) {
+		return timestamp_t(0); // Return epoch on parse error
+	}
+}
+
 // Scan function for the table function
 static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	fprintf(stderr, "[DEBUG] CommonCrawlScan called\n");
@@ -578,8 +604,8 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.url));
 				} else if (col_name == "timestamp") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
-					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.timestamp));
+					auto data_ptr = FlatVector::GetData<timestamp_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = ParseCDXTimestamp(record.timestamp);
 				} else if (col_name == "mime_type") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));

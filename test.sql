@@ -7,9 +7,9 @@ LOAD 'build/debug/extension/common_crawl/common_crawl.duckdb_extension';
 -- This limits CDX API to return only 10 results, making the query much faster
 CALL enable_logging('HTTP');
 
-SELECT url, response
+SELECT url, timestamp, response
 FROM common_crawl_index('CC-MAIN-2025-43', 10)
-WHERE url LIKE '*.teamtailor.com/*'
+WHERE url LIKE '%.teamtailor.com/%'
   AND status_code = 200
   AND mime_type != 'application/pdf'
 LIMIT 10;
