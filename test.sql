@@ -8,8 +8,10 @@ LOAD 'build/debug/extension/common_crawl/common_crawl.duckdb_extension';
 CALL enable_logging('HTTP');
 
 SELECT url, response
-FROM common_crawl_index('CC-MAIN-2025-43', '*.teamtailor.com/*', 10)
-WHERE status_code = 200 AND mime_type != 'application/pdf'
+FROM common_crawl_index('CC-MAIN-2025-43', 10)
+WHERE url LIKE '*.teamtailor.com/*'
+  AND status_code = 200
+  AND mime_type != 'application/pdf'
 LIMIT 10;
 
 .mode line

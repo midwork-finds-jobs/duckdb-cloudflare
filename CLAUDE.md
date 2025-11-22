@@ -4,11 +4,19 @@
 
 ```sql
 SELECT response, url
-FROM common_crawl_index('CC-MAIN-2025-43') -- This syntax can be replaced, also it would be great if all indexes can be queried simultaneously or index from a certain (closest) date
-WHERE url = '*.example.com/*'
+FROM common_crawl_index('CC-MAIN-2025-43')
+WHERE url LIKE '*.example.com/*'  -- URL filtering via WHERE clause
+  AND status_code = 200              -- Pushed down to CDX API as filter
+  AND mime_type != 'application/pdf' -- Pushed down to CDX API as filter
+LIMIT 10;
 ```
 
-This should automatically use the `&fl=` query parameter to solely filter the fields which are needed from the index server.
+Optional CDX API limit parameter:
+```sql
+FROM common_crawl_index('CC-MAIN-2025-43', 100)  -- Limit CDX API to 100 results (default: 10000)
+```
+
+The extension automatically uses the `&fl=` query parameter to fetch only the fields which are needed from the index server.
 
 If response is requested you need these 3 parameters from the index server:
 ```
@@ -21,8 +29,6 @@ If only `url` is requested then you don't need to query the warc files with rang
 See index server API docs: https://github.com/webrecorder/pywb/wiki/CDX-Server-API#api-reference
 
 All common crawl indexes and their metadata can be found from: https://index.commoncrawl.org/collinfo.json
-
-It would be great if you can implement predicate pushdown so that the filters in `WHERE` would actually affect which kind of http requests are made.
 
 ## Implementation details
 

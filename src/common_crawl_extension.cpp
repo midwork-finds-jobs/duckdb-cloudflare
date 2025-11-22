@@ -414,9 +414,10 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	fprintf(stderr, "[DEBUG] CommonCrawlBind called\n");
 	fflush(stderr);
-	// Expect 1-3 parameters: index name, optional URL pattern, optional limit
-	if (input.inputs.size() < 1 || input.inputs.size() > 3) {
-		throw BinderException("common_crawl_index requires 1-3 parameters: index_name, optional url_pattern, optional limit");
+	// Expect 1-2 parameters: index name, optional limit
+	// URL filtering is now done via WHERE clause (predicate pushdown)
+	if (input.inputs.size() < 1 || input.inputs.size() > 2) {
+		throw BinderException("common_crawl_index requires 1-2 parameters: index_name, optional cdx_limit");
 	}
 
 	if (input.inputs[0].type().id() != LogicalTypeId::VARCHAR) {
@@ -428,21 +429,13 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	fprintf(stderr, "[DEBUG] Index name: %s\n", index_name.c_str());
 	auto bind_data = make_uniq<CommonCrawlBindData>(index_name);
 
-	// Check for optional URL pattern parameter
-	if (input.inputs.size() >= 2) {
-		if (input.inputs[1].type().id() != LogicalTypeId::VARCHAR) {
-			throw BinderException("common_crawl_index url_pattern must be a string");
+	// Check for optional limit parameter (now 2nd param instead of 3rd)
+	if (input.inputs.size() == 2) {
+		if (input.inputs[1].type().id() != LogicalTypeId::BIGINT &&
+		    input.inputs[1].type().id() != LogicalTypeId::INTEGER) {
+			throw BinderException("common_crawl_index cdx_limit must be an integer");
 		}
-		bind_data->url_filter = input.inputs[1].ToString();
-	}
-
-	// Check for optional limit parameter
-	if (input.inputs.size() == 3) {
-		if (input.inputs[2].type().id() != LogicalTypeId::BIGINT &&
-		    input.inputs[2].type().id() != LogicalTypeId::INTEGER) {
-			throw BinderException("common_crawl_index limit must be an integer");
-		}
-		bind_data->max_results = input.inputs[2].GetValue<int64_t>();
+		bind_data->max_results = input.inputs[1].GetValue<int64_t>();
 	}
 
 	// Define output columns
@@ -731,10 +724,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Or set autoload_known_extensions=1 and autoinstall_known_extensions=1
 
 	// Register the common_crawl_index table function with variable arguments
-	// Accepts: (index_name) or (index_name, url_pattern)
+	// URL filtering is done via WHERE clause, not function parameter
 	TableFunctionSet common_crawl_set("common_crawl_index");
 
 	// Single parameter version: common_crawl_index('CC-MAIN-2025-43')
+	// Use: WHERE url LIKE '*.example.com/*' for URL filtering
 	auto func1 = TableFunction({LogicalType::VARCHAR},
 	                           CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
 	func1.cardinality = CommonCrawlCardinality;
@@ -742,21 +736,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	func1.projection_pushdown = true; // Enable projection pushdown
 	common_crawl_set.AddFunction(func1);
 
-	// Two parameter version: common_crawl_index('CC-MAIN-2025-43', '*.example.com/*')
-	auto func2 = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR},
+	// Two parameter version: common_crawl_index('CC-MAIN-2025-43', 100)
+	// Second param is CDX API result limit
+	auto func2 = TableFunction({LogicalType::VARCHAR, LogicalType::BIGINT},
 	                           CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
 	func2.cardinality = CommonCrawlCardinality;
 	func2.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
 	func2.projection_pushdown = true; // Enable projection pushdown
 	common_crawl_set.AddFunction(func2);
-
-	// Three parameter version: common_crawl_index('CC-MAIN-2025-43', '*.example.com/*', 100)
-	auto func3 = TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT},
-	                           CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
-	func3.cardinality = CommonCrawlCardinality;
-	func3.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
-	func3.projection_pushdown = true; // Enable projection pushdown
-	common_crawl_set.AddFunction(func3);
 
 	loader.RegisterFunction(common_crawl_set);
 }
