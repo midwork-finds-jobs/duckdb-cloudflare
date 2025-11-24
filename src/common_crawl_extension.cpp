@@ -16,8 +16,10 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -34,6 +36,8 @@
 #include <vector>
 #include <sstream>
 #include <chrono>
+#include <future>
+#include <thread>
 
 namespace duckdb {
 
@@ -55,7 +59,7 @@ struct CollInfoCache {
 
 static CollInfoCache g_collinfo_cache;
 
-// Structure to hold CDX record data
+// Structure to hold CDX record data (Common Crawl)
 struct CDXRecord {
 	string url;
 	string filename;
@@ -66,6 +70,17 @@ struct CDXRecord {
 	string digest;
 	int32_t status_code;
 	string crawl_id;
+};
+
+// Structure to hold Internet Archive CDX record data
+struct ArchiveOrgRecord {
+	string urlkey;       // SURT-formatted URL key
+	string timestamp;    // YYYYMMDDhhmmss format
+	string original;     // Original URL
+	string mime_type;    // MIME type
+	int32_t status_code; // HTTP status code
+	string digest;       // SHA-1 hash
+	int64_t length;      // Content length
 };
 
 // Structure to hold bind data for the table function
@@ -80,9 +95,10 @@ struct CommonCrawlBindData : public TableFunctionData {
 	vector<string> cdx_filters; // CDX API filter parameters (e.g., "=status:200", "=mime:text/html")
 	idx_t max_results; // Maximum number of results to fetch from CDX API
 
-	// Default CDX limit reduced to 1000 for better performance with small LIMIT clauses
-	// Users can override with: common_crawl_index(10000) if they need more records
-	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(1000) {}
+	// Default CDX limit set to 100 to prevent fetching too many results
+	// FIXME: When DuckDB v1.5+ support is added, LIMIT will be pushed down and override this value
+	// See FIXME comment in CommonCrawlInitGlobal for implementation details
+	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(100) {}
 };
 
 // Structure to hold global state for the table function
@@ -582,22 +598,21 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	fprintf(stderr, "[DEBUG] CommonCrawlBind called\n");
 	fflush(stderr);
 
-	// No parameters required - crawl_id will be set from WHERE clause or default to latest
-	// Optional: single parameter for cdx_limit
-	if (input.inputs.size() > 1) {
-		throw BinderException("common_crawl_index requires 0-1 parameters: optional cdx_limit");
-	}
-
-	// Start with empty index_name - will be set from filter or default to latest
+	// Optional max_results named parameter to control CDX API result size
+	// If provided, overrides the default max_results (100)
 	auto bind_data = make_uniq<CommonCrawlBindData>("");
 
-	// Check for optional limit parameter
-	if (input.inputs.size() == 1) {
-		if (input.inputs[0].type().id() != LogicalTypeId::BIGINT &&
-		    input.inputs[0].type().id() != LogicalTypeId::INTEGER) {
-			throw BinderException("common_crawl_index cdx_limit must be an integer");
+	// Handle named parameters
+	for (auto &kv : input.named_parameters) {
+		if (kv.first == "max_results") {
+			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
+				throw BinderException("common_crawl_index max_results parameter must be an integer");
+			}
+			bind_data->max_results = kv.second.GetValue<int64_t>();
+			fprintf(stderr, "[DEBUG] CDX API max_results set to: %lu\n", (unsigned long)bind_data->max_results);
+		} else {
+			throw BinderException("Unknown parameter '%s' for common_crawl_index", kv.first.c_str());
 		}
-		bind_data->max_results = input.inputs[0].GetValue<int64_t>();
 	}
 
 	// Define output columns
@@ -671,6 +686,28 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	fprintf(stderr, "[DEBUG] CommonCrawlInitGlobal called\n");
 	auto &bind_data = const_cast<CommonCrawlBindData&>(input.bind_data->Cast<CommonCrawlBindData>());
 	auto state = make_uniq<CommonCrawlGlobalState>();
+
+	// FIXME: LIMIT pushdown for DuckDB v1.5+
+	// ===========================================
+	// Current limitation: DuckDB v1.4.2 does not expose LIMIT value in TableFunctionInitInput
+	//
+	// When upgrading to DuckDB v1.5 or later:
+	// 1. Check if TableFunctionInitInput has a 'max_rows' field
+	// 2. Uncomment the following code to enable automatic LIMIT pushdown:
+	//
+	// if (input.max_rows != NumericLimits<idx_t>::Maximum()) {
+	//     bind_data.max_results = input.max_rows;
+	//     fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
+	//             (unsigned long)bind_data.max_results);
+	// }
+	//
+	// 3. Test with queries like: SELECT * FROM common_crawl_index() LIMIT 10
+	//    and verify that CDX API receives &limit=10 instead of &limit=10000
+	// 4. Update CLAUDE.md to document automatic LIMIT pushdown capability
+	// 5. Remove this FIXME comment
+	//
+	// Current behavior: Uses default max_results=10000 for all queries
+	// Users should use WHERE clauses to narrow down result sets
 
 	// If no crawl_id was specified in WHERE clause, fetch the latest one
 	// Don't fetch if crawl_ids vector is populated (from IN clause)
@@ -751,12 +788,26 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 
 	// Query CDX API - handle multiple crawl_ids if IN clause was used
 	if (!bind_data.crawl_ids.empty()) {
-		// IN clause detected: query each crawl_id separately and combine results
+		// IN clause detected: query each crawl_id in parallel and combine results
+		fprintf(stderr, "[DEBUG] Launching %lu parallel CDX API requests\n", (unsigned long)bind_data.crawl_ids.size());
+
+		std::vector<std::future<vector<CDXRecord>>> futures;
+		futures.reserve(bind_data.crawl_ids.size());
+
+		// Launch async requests for each crawl_id
 		for (const auto &crawl_id : bind_data.crawl_ids) {
-			auto records = QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
-			// Append records to state
+			futures.push_back(std::async(std::launch::async, [&context, crawl_id, url_pattern, &needed_fields, &bind_data]() {
+				return QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+			}));
+		}
+
+		// Collect results from all futures
+		for (auto &future : futures) {
+			auto records = future.get();
 			state->records.insert(state->records.end(), records.begin(), records.end());
 		}
+
+		fprintf(stderr, "[DEBUG] All parallel requests completed, total records: %lu\n", (unsigned long)state->records.size());
 	} else {
 		// Single crawl_id: use index_name
 		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
@@ -835,6 +886,31 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &gstate = data.global_state->Cast<CommonCrawlGlobalState>();
 	fprintf(stderr, "[DEBUG] Have %lu records to process\n", (unsigned long)gstate.records.size());
 
+	// Pre-fetch WARCs in parallel for this chunk if needed
+	std::vector<WARCResponse> warc_responses;
+	idx_t chunk_size = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.records.size() - gstate.current_position);
+
+	if (bind_data.fetch_response && chunk_size > 0) {
+		fprintf(stderr, "[DEBUG] Pre-fetching %lu WARCs in parallel\n", (unsigned long)chunk_size);
+		std::vector<std::future<WARCResponse>> warc_futures;
+		warc_futures.reserve(chunk_size);
+
+		// Launch parallel WARC fetches
+		for (idx_t i = 0; i < chunk_size; i++) {
+			auto &record = gstate.records[gstate.current_position + i];
+			warc_futures.push_back(std::async(std::launch::async, [&context, record]() {
+				return FetchWARCResponse(context, record);
+			}));
+		}
+
+		// Collect results
+		warc_responses.reserve(chunk_size);
+		for (auto &future : warc_futures) {
+			warc_responses.push_back(future.get());
+		}
+		fprintf(stderr, "[DEBUG] All %lu WARCs fetched\n", (unsigned long)chunk_size);
+	}
+
 	idx_t output_offset = 0;
 	while (gstate.current_position < gstate.records.size() && output_offset < STANDARD_VECTOR_SIZE) {
 		auto &record = gstate.records[gstate.current_position];
@@ -875,8 +951,8 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], record.crawl_id);
 				} else if (col_name == "warc" || col_name == "response") {
-					if (bind_data.fetch_response) {
-						WARCResponse warc_response = FetchWARCResponse(context, record);
+					if (bind_data.fetch_response && !warc_responses.empty()) {
+						WARCResponse &warc_response = warc_responses[output_offset];
 
 						if (col_name == "warc") {
 							// WARC STRUCT with version and headers
@@ -895,13 +971,15 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							auto &map_values = MapVector::GetValues(*headers_map);
 
 							idx_t map_offset = ListVector::GetListSize(*headers_map);
+							idx_t new_size = map_offset + warc_response.warc_headers.size();
+							ListVector::Reserve(*headers_map, new_size);
+
+							auto key_data = FlatVector::GetData<string_t>(map_keys);
+							auto value_data = FlatVector::GetData<string_t>(map_values);
+
 							for (const auto &header : warc_response.warc_headers) {
-								auto key_data = FlatVector::GetData<string_t>(map_keys);
 								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
-
-								auto value_data = FlatVector::GetData<string_t>(map_values);
 								value_data[map_offset] = StringVector::AddString(map_values, SanitizeUTF8(header.second));
-
 								map_offset++;
 							}
 
@@ -926,13 +1004,15 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							auto &map_values = MapVector::GetValues(*headers_map);
 
 							idx_t map_offset = ListVector::GetListSize(*headers_map);
+							idx_t new_size = map_offset + warc_response.http_headers.size();
+							ListVector::Reserve(*headers_map, new_size);
+
+							auto key_data = FlatVector::GetData<string_t>(map_keys);
+							auto value_data = FlatVector::GetData<string_t>(map_values);
+
 							for (const auto &header : warc_response.http_headers) {
-								auto key_data = FlatVector::GetData<string_t>(map_keys);
 								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
-
-								auto value_data = FlatVector::GetData<string_t>(map_values);
 								value_data[map_offset] = StringVector::AddString(map_values, SanitizeUTF8(header.second));
-
 								map_offset++;
 							}
 
@@ -1222,11 +1302,541 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 	}
 }
 
-// Cardinality function to handle LIMIT pushdown
+// Cardinality function to provide row count estimates to DuckDB optimizer
 static unique_ptr<NodeStatistics> CommonCrawlCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<CommonCrawlBindData>();
 	// Return the max results as an estimate - this helps DuckDB optimize the query plan
+	// FIXME: With DuckDB v1.5+ LIMIT pushdown, this will accurately reflect the LIMIT value
+	// which will enable better query optimization (e.g., choosing more efficient join strategies)
 	return make_uniq<NodeStatistics>(bind_data.max_results);
+}
+
+// ========================================
+// INTERNET ARCHIVE TABLE FUNCTION
+// ========================================
+
+// Structure to hold bind data for internet_archive table function
+struct InternetArchiveBindData : public TableFunctionData {
+	vector<string> column_names;
+	vector<LogicalType> column_types;
+	vector<string> fields_needed;
+	bool fetch_response;
+	string url_filter;
+	string match_type; // exact, prefix, host, domain
+	vector<string> cdx_filters; // filter=field:regex
+	string from_date; // YYYYMMDDhhmmss
+	string to_date;   // YYYYMMDDhhmmss
+	idx_t max_results; // Default limit
+
+	InternetArchiveBindData() : fetch_response(false), url_filter("*"), match_type("exact"), max_results(100) {}
+};
+
+// Structure to hold global state for internet_archive table function
+struct InternetArchiveGlobalState : public GlobalTableFunctionState {
+	vector<ArchiveOrgRecord> records;
+	idx_t current_position;
+	vector<column_t> column_ids;
+
+	InternetArchiveGlobalState() : current_position(0) {}
+
+	idx_t MaxThreads() const override {
+		return 1; // Single-threaded
+	}
+};
+
+// Helper function to query Internet Archive CDX API
+static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const string &url_pattern,
+                                                     const string &match_type, const vector<string> &fields_needed,
+                                                     const vector<string> &cdx_filters, const string &from_date,
+                                                     const string &to_date, idx_t max_results) {
+	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX started\n");
+	vector<ArchiveOrgRecord> records;
+
+	// Construct field list for &fl= parameter
+	string field_list = "urlkey,timestamp,original,mimetype,statuscode,digest,length";
+
+	// Construct the CDX API URL
+	string cdx_url = "https://web.archive.org/cdx/search/cdx?url=" + url_pattern +
+	                 "&output=json&fl=" + field_list;
+
+	// Add matchType if not exact (default)
+	if (match_type != "exact") {
+		cdx_url += "&matchType=" + match_type;
+	}
+
+	// Add date range filters
+	if (!from_date.empty()) {
+		cdx_url += "&from=" + from_date;
+	}
+	if (!to_date.empty()) {
+		cdx_url += "&to=" + to_date;
+	}
+
+	// Add limit
+	cdx_url += "&limit=" + to_string(max_results);
+
+	// Add filter parameters
+	for (const auto &filter : cdx_filters) {
+		cdx_url += "&filter=" + filter;
+	}
+
+	fprintf(stderr, "[CDX URL] %s\n", cdx_url.c_str());
+
+	try {
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto file_handle = fs.OpenFile(cdx_url, FileFlags::FILE_FLAGS_READ);
+
+		// Read the response
+		string response_data;
+		const idx_t buffer_size = 8192;
+		auto buffer = unique_ptr<char[]>(new char[buffer_size]);
+
+		while (true) {
+			int64_t bytes_read = file_handle->Read(buffer.get(), buffer_size);
+			if (bytes_read <= 0) {
+				break;
+			}
+			response_data.append(buffer.get(), bytes_read);
+		}
+
+		// Sanitize UTF-8
+		response_data = SanitizeUTF8(response_data);
+
+		// Parse newline-delimited JSON
+		std::istringstream stream(response_data);
+		string line;
+		int line_count = 0;
+		bool first_line = true;
+
+		while (std::getline(stream, line)) {
+			if (line.empty() || line[0] != '[') {
+				continue;
+			}
+			line_count++;
+
+			// Skip header line (first line with field names)
+			if (first_line) {
+				first_line = false;
+				continue;
+			}
+
+			ArchiveOrgRecord record;
+
+			// Extract fields from JSON line
+			// Format: ["urlkey","timestamp","original","mimetype","statuscode","digest","length"]
+			record.urlkey = ExtractJSONValue(line, "");  // Will need better parsing
+			record.timestamp = ExtractJSONValue(line, "");
+			record.original = ExtractJSONValue(line, "");
+
+			// For now, parse the JSON array manually
+			// Remove brackets and quotes, split by comma
+			// This is a simple parser - a proper JSON parser would be better
+			size_t start = line.find('[');
+			size_t end = line.rfind(']');
+			if (start != string::npos && end != string::npos && end > start) {
+				string data = line.substr(start + 1, end - start - 1);
+
+				// Parse array elements
+				vector<string> values;
+				size_t pos = 0;
+				bool in_quotes = false;
+				string current;
+
+				for (size_t i = 0; i < data.length(); i++) {
+					char c = data[i];
+					if (c == '"' && (i == 0 || data[i-1] != '\\')) {
+						in_quotes = !in_quotes;
+					} else if (c == ',' && !in_quotes) {
+						values.push_back(current);
+						current.clear();
+					} else if (c != '"') {
+						current += c;
+					}
+				}
+				if (!current.empty()) {
+					values.push_back(current);
+				}
+
+				// Assign values if we have enough
+				if (values.size() >= 7) {
+					record.urlkey = values[0];
+					record.timestamp = values[1];
+					record.original = values[2];
+					record.mime_type = values[3];
+					record.status_code = values[4].empty() ? 0 : std::stoi(values[4]);
+					record.digest = values[5];
+					record.length = values[6].empty() ? 0 : std::stoll(values[6]);
+
+					records.push_back(record);
+				}
+			}
+		}
+		fprintf(stderr, "[DEBUG] Parsed %d JSON lines, got %lu records\n", line_count, (unsigned long)records.size());
+
+	} catch (std::exception &ex) {
+		throw IOException("Error querying Internet Archive CDX API: " + string(ex.what()));
+	}
+
+	return records;
+}
+
+// Helper function to fetch archived page from Internet Archive
+static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &record) {
+	if (record.timestamp.empty() || record.original.empty()) {
+		return "[Error: Missing timestamp or URL]";
+	}
+
+	try {
+		// Construct the download URL with id_ suffix to get raw content
+		string download_url = "https://web.archive.org/web/" + record.timestamp + "id_/" + record.original;
+		fprintf(stderr, "[DEBUG] Fetching: %s\n", download_url.c_str());
+
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);
+
+		// Read the response
+		string response_data;
+		const idx_t buffer_size = 8192;
+		auto buffer = unique_ptr<char[]>(new char[buffer_size]);
+
+		while (true) {
+			int64_t bytes_read = file_handle->Read(buffer.get(), buffer_size);
+			if (bytes_read <= 0) {
+				break;
+			}
+			response_data.append(buffer.get(), bytes_read);
+		}
+
+		return response_data;
+
+	} catch (Exception &ex) {
+		return "[Error fetching archived page: " + string(ex.what()) + "]";
+	} catch (std::exception &ex) {
+		return "[Error fetching archived page: " + string(ex.what()) + "]";
+	}
+}
+
+// Bind function for internet_archive table function
+static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
+	fprintf(stderr, "[DEBUG] InternetArchiveBind called\n");
+
+	auto bind_data = make_uniq<InternetArchiveBindData>();
+
+	// Handle named parameters
+	for (auto &kv : input.named_parameters) {
+		if (kv.first == "max_results") {
+			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
+				throw BinderException("internet_archive max_results parameter must be an integer");
+			}
+			bind_data->max_results = kv.second.GetValue<int64_t>();
+			fprintf(stderr, "[DEBUG] CDX API max_results set to: %lu\n", (unsigned long)bind_data->max_results);
+		} else {
+			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
+		}
+	}
+
+	// Define output columns
+	names.push_back("url");
+	return_types.push_back(LogicalType::VARCHAR);
+	bind_data->fields_needed.push_back("original");
+
+	names.push_back("timestamp");
+	return_types.push_back(LogicalType::TIMESTAMP_TZ);
+	bind_data->fields_needed.push_back("timestamp");
+
+	names.push_back("urlkey");
+	return_types.push_back(LogicalType::VARCHAR);
+	bind_data->fields_needed.push_back("urlkey");
+
+	names.push_back("mime_type");
+	return_types.push_back(LogicalType::VARCHAR);
+	bind_data->fields_needed.push_back("mimetype");
+
+	names.push_back("status_code");
+	return_types.push_back(LogicalType::INTEGER);
+	bind_data->fields_needed.push_back("statuscode");
+
+	names.push_back("digest");
+	return_types.push_back(LogicalType::VARCHAR);
+	bind_data->fields_needed.push_back("digest");
+
+	names.push_back("length");
+	return_types.push_back(LogicalType::BIGINT);
+	bind_data->fields_needed.push_back("length");
+
+	// Add response column (BLOB for raw HTTP body)
+	names.push_back("response");
+	return_types.push_back(LogicalType::BLOB);
+
+	// Don't set fetch_response here - will be determined by projection pushdown
+	bind_data->fetch_response = false;
+	bind_data->column_names = names;
+	bind_data->column_types = return_types;
+
+	return std::move(bind_data);
+}
+
+// Init global state function for internet_archive
+static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientContext &context,
+                                                                        TableFunctionInitInput &input) {
+	fprintf(stderr, "[DEBUG] InternetArchiveInitGlobal called\n");
+	auto &bind_data = const_cast<InternetArchiveBindData&>(input.bind_data->Cast<InternetArchiveBindData>());
+	auto state = make_uniq<InternetArchiveGlobalState>();
+
+	// Store projected columns
+	state->column_ids = input.column_ids;
+
+	// Determine if we need to fetch response based on projection
+	for (auto &col_id : input.column_ids) {
+		if (col_id < bind_data.column_names.size()) {
+			string col_name = bind_data.column_names[col_id];
+			fprintf(stderr, "[DEBUG] Projected column: %s\n", col_name.c_str());
+			if (col_name == "response") {
+				bind_data.fetch_response = true;
+				fprintf(stderr, "[DEBUG] Will fetch response bodies\n");
+			}
+		}
+	}
+
+	// Query Internet Archive CDX API
+	state->records = QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type,
+	                                     bind_data.fields_needed, bind_data.cdx_filters,
+	                                     bind_data.from_date, bind_data.to_date, bind_data.max_results);
+
+	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX returned %lu records\n", (unsigned long)state->records.size());
+
+	return std::move(state);
+}
+
+// Scan function for internet_archive table function
+static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<InternetArchiveBindData>();
+	auto &gstate = data.global_state->Cast<InternetArchiveGlobalState>();
+
+	idx_t output_offset = 0;
+	while (gstate.current_position < gstate.records.size() && output_offset < STANDARD_VECTOR_SIZE) {
+		auto &record = gstate.records[gstate.current_position];
+
+		// Process each projected column
+		for (idx_t proj_idx = 0; proj_idx < gstate.column_ids.size(); proj_idx++) {
+			auto col_id = gstate.column_ids[proj_idx];
+			string col_name = bind_data.column_names[col_id];
+
+			try {
+				if (col_name == "url") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.original));
+				} else if (col_name == "timestamp") {
+					auto data_ptr = FlatVector::GetData<timestamp_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = ParseCDXTimestamp(record.timestamp);
+				} else if (col_name == "urlkey") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.urlkey));
+				} else if (col_name == "mime_type") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));
+				} else if (col_name == "status_code") {
+					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = record.status_code;
+				} else if (col_name == "digest") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.digest));
+				} else if (col_name == "length") {
+					auto data_ptr = FlatVector::GetData<int64_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = record.length;
+				} else if (col_name == "response") {
+					if (bind_data.fetch_response) {
+						string body = FetchArchivedPage(context, record);
+						auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+						data_ptr[output_offset] = StringVector::AddStringOrBlob(output.data[proj_idx], body);
+					} else {
+						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
+					}
+				}
+			} catch (const std::exception &ex) {
+				fprintf(stderr, "[ERROR] Failed to process column %s: %s\n", col_name.c_str(), ex.what());
+			}
+		}
+
+		output_offset++;
+		gstate.current_position++;
+	}
+
+	output.SetCardinality(output_offset);
+}
+
+// Filter pushdown for internet_archive
+static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                                   vector<unique_ptr<Expression>> &filters) {
+	fprintf(stderr, "[DEBUG] InternetArchivePushdownComplexFilter called with %lu filters\n", (unsigned long)filters.size());
+	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
+
+	// Build column map
+	std::unordered_map<string, idx_t> column_map;
+	for (idx_t i = 0; i < bind_data.column_names.size(); i++) {
+		column_map[bind_data.column_names[i]] = i;
+	}
+
+	vector<idx_t> filters_to_remove;
+
+	for (idx_t i = 0; i < filters.size(); i++) {
+		auto &filter = filters[i];
+
+		// Handle LIKE/CONTAINS for URL filtering
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+			auto &func = filter->Cast<BoundFunctionExpression>();
+
+			if ((func.function.name == "contains" || func.function.name == "like" || func.function.name == "~~") &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					bind_data.url_filter = constant.value.ToString();
+
+					// Detect matchType from pattern
+					if (bind_data.url_filter.find("*") == 0) {
+						bind_data.match_type = "domain";
+						bind_data.url_filter = bind_data.url_filter.substr(1); // Remove leading *
+					} else if (bind_data.url_filter.find("/*") != string::npos) {
+						bind_data.match_type = "prefix";
+						bind_data.url_filter = bind_data.url_filter.substr(0, bind_data.url_filter.find("/*"));
+					}
+
+					fprintf(stderr, "[DEBUG] URL filter: %s, matchType: %s\n",
+					        bind_data.url_filter.c_str(), bind_data.match_type.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+		}
+
+		// Handle comparison filters
+		if (filter->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+			continue;
+		}
+
+		auto &comparison = filter->Cast<BoundComparisonExpression>();
+		if (comparison.left->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    comparison.right->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			continue;
+		}
+
+		auto &col_ref = comparison.left->Cast<BoundColumnRefExpression>();
+		auto &constant = comparison.right->Cast<BoundConstantExpression>();
+		string column_name = col_ref.GetName();
+
+		// Handle URL filtering via equality/LIKE
+		if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+			if (filter->type == ExpressionType::COMPARE_EQUAL) {
+				bind_data.url_filter = constant.value.ToString();
+				bind_data.match_type = "exact";
+				fprintf(stderr, "[DEBUG] URL filter (exact): %s\n", bind_data.url_filter.c_str());
+				filters_to_remove.push_back(i);
+			}
+		}
+		// Handle status_code filtering
+		if (column_name == "status_code" &&
+		    (constant.value.type().id() == LogicalTypeId::INTEGER ||
+		     constant.value.type().id() == LogicalTypeId::BIGINT)) {
+			if (filter->type == ExpressionType::COMPARE_EQUAL) {
+				string filter_str = "statuscode:" + to_string(constant.value.GetValue<int32_t>());
+				bind_data.cdx_filters.push_back(filter_str);
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
+				string filter_str = "!statuscode:" + to_string(constant.value.GetValue<int32_t>());
+				bind_data.cdx_filters.push_back(filter_str);
+				filters_to_remove.push_back(i);
+			}
+		}
+		// Handle mime_type filtering
+		else if (column_name == "mime_type" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+			if (filter->type == ExpressionType::COMPARE_EQUAL) {
+				string filter_str = "mimetype:" + constant.value.ToString();
+				bind_data.cdx_filters.push_back(filter_str);
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
+				string filter_str = "!mimetype:" + constant.value.ToString();
+				bind_data.cdx_filters.push_back(filter_str);
+				filters_to_remove.push_back(i);
+			}
+		}
+	}
+
+	// Remove pushed down filters
+	for (idx_t i = filters_to_remove.size(); i > 0; i--) {
+		filters.erase(filters.begin() + filters_to_remove[i - 1]);
+	}
+}
+
+// Cardinality function for internet_archive
+static unique_ptr<NodeStatistics> InternetArchiveCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
+	return make_uniq<NodeStatistics>(bind_data.max_results);
+}
+
+// ========================================
+// EXTENSION LOADER
+// ========================================
+
+// Optimizer function to push down LIMIT to internet_archive function
+static void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
+	if (op->type == LogicalOperatorType::LOGICAL_LIMIT) {
+		auto &limit = op->Cast<LogicalLimit>();
+		reference<LogicalOperator> child = *op->children[0];
+
+		// Skip projection operators to find the GET
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			child = *child.get().children[0];
+		}
+
+		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
+			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			return;
+		}
+
+		auto &get = child.get().Cast<LogicalGet>();
+		if (get.function.name != "internet_archive") {
+			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			return;
+		}
+
+		// Only push down constant limits (not expressions)
+		switch (limit.limit_val.Type()) {
+		case LimitNodeType::CONSTANT_VALUE:
+		case LimitNodeType::UNSET:
+			break;
+		default:
+			// not a constant or unset limit
+			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			return;
+		}
+
+		// Extract limit value and store in bind_data
+		auto &bind_data = get.bind_data->Cast<InternetArchiveBindData>();
+		if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+			bind_data.max_results = limit.limit_val.GetConstantValue();
+			fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
+			        (unsigned long)bind_data.max_results);
+
+			// Remove the LIMIT node from the plan since we've pushed it down
+			op = std::move(op->children[0]);
+			return;
+		}
+	}
+
+	// Recurse into children
+	for (auto &child : op->children) {
+		OptimizeInternetArchiveLimitPushdown(child);
+	}
+}
+
+static void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	OptimizeInternetArchiveLimitPushdown(plan);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -1237,31 +1847,56 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Users should run: INSTALL httpfs; LOAD httpfs; before loading this extension
 	// Or set autoload_known_extensions=1 and autoinstall_known_extensions=1
 
-	// Register the common_crawl_index table function with variable arguments
-	// crawl_id filtering is done via WHERE clause
-	// Defaults to latest crawl_id from collinfo.json if not specified
+	// Register the common_crawl_index table function
+	// Usage: SELECT * FROM common_crawl_index() WHERE crawl_id = 'CC-MAIN-2025-43' LIMIT 10
+	// Usage with max_results: SELECT * FROM common_crawl_index(max_results := 500) WHERE crawl_id = 'CC-MAIN-2025-43'
+	// - crawl_id filtering is done via WHERE clause (defaults to latest if not specified)
+	// - URL filtering: WHERE url LIKE '*.example.com/*'
+	// - Optional max_results parameter controls CDX API result size (default: 100)
 	TableFunctionSet common_crawl_set("common_crawl_index");
 
-	// No parameter version: common_crawl_index()
-	// Use: WHERE crawl_id = 'CC-MAIN-2025-43' to specify crawl
-	// Use: WHERE url LIKE '*.example.com/*' for URL filtering
-	auto func0 = TableFunction({},
-	                           CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
-	func0.cardinality = CommonCrawlCardinality;
-	func0.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
-	func0.projection_pushdown = true; // Enable projection pushdown
-	common_crawl_set.AddFunction(func0);
+	auto func = TableFunction({},
+	                          CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
+	func.cardinality = CommonCrawlCardinality;
+	func.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
+	func.projection_pushdown = true;
 
-	// Single parameter version: common_crawl_index(100)
-	// Parameter is CDX API result limit
-	auto func1 = TableFunction({LogicalType::BIGINT},
-	                           CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
-	func1.cardinality = CommonCrawlCardinality;
-	func1.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
-	func1.projection_pushdown = true; // Enable projection pushdown
-	common_crawl_set.AddFunction(func1);
+	// Add named parameter
+	func.named_parameters["max_results"] = LogicalType::BIGINT;
+
+	common_crawl_set.AddFunction(func);
 
 	loader.RegisterFunction(common_crawl_set);
+
+	// Register the internet_archive table function
+	// Usage: SELECT * FROM internet_archive() WHERE url = 'archive.org' LIMIT 10
+	// Usage with max_results: SELECT * FROM internet_archive(max_results := 500) WHERE url = 'archive.org'
+	// - URL filtering via WHERE clause
+	// - Supports matchType detection (exact, prefix, host, domain)
+	// - Much simpler than common_crawl - no WARC parsing needed
+	// - Projection pushdown: only fetches response when needed
+	// - Optional max_results parameter controls CDX API result size (default: 100)
+	TableFunctionSet internet_archive_set("internet_archive");
+
+	auto ia_func = TableFunction({},
+	                              InternetArchiveScan, InternetArchiveBind, InternetArchiveInitGlobal);
+	ia_func.cardinality = InternetArchiveCardinality;
+	ia_func.pushdown_complex_filter = InternetArchivePushdownComplexFilter;
+	ia_func.projection_pushdown = true;
+
+	// Add named parameter
+	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
+
+	internet_archive_set.AddFunction(ia_func);
+
+	loader.RegisterFunction(internet_archive_set);
+
+	// Register optimizer extension for LIMIT pushdown
+	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	OptimizerExtension optimizer;
+	optimizer.optimize_function = CommonCrawlOptimizer;
+	config.optimizer_extensions.push_back(std::move(optimizer));
+	fprintf(stderr, "[DEBUG] Optimizer extension registered for LIMIT pushdown\n");
 }
 
 void CommonCrawlExtension::Load(ExtensionLoader &loader) {

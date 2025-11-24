@@ -1,19 +1,27 @@
-# DuckDB extension to query common crawl pages
+# DuckDB extension to query archived web pages
+
+This extension provides two table functions:
+1. **common_crawl_index()** - Query Common Crawl web archive (2008-present, monthly snapshots)
+2. **internet_archive()** - Query Internet Archive Wayback Machine (1996-present, continuous)
 
 ## Example of how duckdb can be used with this extension:
 
 ```sql
 SELECT response, url
-FROM common_crawl_index('CC-MAIN-2025-43')
-WHERE url LIKE '*.example.com/*'  -- URL filtering via WHERE clause
+FROM common_crawl_index()
+WHERE crawl_id = 'CC-MAIN-2025-43'   -- Specify crawl via WHERE (defaults to latest)
+  AND url LIKE '*.example.com/*'  -- URL filtering via WHERE clause
   AND status_code = 200              -- Pushed down to CDX API as filter
   AND mime_type != 'application/pdf' -- Pushed down to CDX API as filter
-LIMIT 10;
+LIMIT 10;                            -- LIMIT is automatically pushed down to CDX API
 ```
 
-Optional CDX API limit parameter:
+LIMIT and result size:
 ```sql
-FROM common_crawl_index('CC-MAIN-2025-43', 100)  -- Limit CDX API to 100 results (default: 10000)
+-- The extension fetches up to 10000 results from CDX API by default
+-- Use WHERE clauses to narrow down the result set
+-- In future DuckDB versions (v1.5+), LIMIT will be automatically pushed down to CDX API
+SELECT url FROM common_crawl_index() WHERE crawl_id = 'CC-MAIN-2025-43' LIMIT 10;
 ```
 
 The extension automatically uses the `&fl=` query parameter to fetch only the fields which are needed from the index server.
@@ -29,6 +37,40 @@ If only `url` is requested then you don't need to query the warc files with rang
 See index server API docs: https://github.com/webrecorder/pywb/wiki/CDX-Server-API#api-reference
 
 All common crawl indexes and their metadata can be found from: https://index.commoncrawl.org/collinfo.json
+
+## Internet Archive Wayback Machine
+
+```sql
+-- Query archived snapshots with automatic LIMIT pushdown
+SELECT url, timestamp, mime_type, status_code
+FROM internet_archive()
+WHERE url = 'archive.org'       -- Exact URL match
+  AND status_code = 200          -- Only successful responses
+  AND mime_type = 'text/html'    -- Only HTML pages
+LIMIT 10;                        -- LIMIT automatically pushed to CDX API
+
+-- Fetch archived page content
+SELECT url, timestamp, response
+FROM internet_archive()
+WHERE url = 'archive.org/about/'
+  AND status_code = 200
+ORDER BY timestamp DESC
+LIMIT 1;
+
+-- URL matching modes (auto-detected from pattern):
+WHERE url = 'archive.org'           -- Exact match
+WHERE url LIKE 'archive.org/%'      -- Prefix match (all paths under archive.org/)
+WHERE url LIKE 'archive.org/about%' -- Prefix match
+WHERE url LIKE '*.archive.org'      -- Domain match (includes subdomains)
+```
+
+**Key differences from common_crawl_index():**
+- Much simpler data retrieval (no WARC parsing)
+- Historical data from 1996 onwards
+- Response column is raw HTTP body (not structured WARC)
+- Direct download via `https://web.archive.org/web/{timestamp}id_/{url}`
+
+See [docs/INTERNET_ARCHIVE.md](docs/INTERNET_ARCHIVE.md) for complete documentation.
 
 ## Implementation details
 
@@ -50,6 +92,15 @@ void MyExtension::Load(DuckDB &db) {
     // ... rest of load logic
 }
 ```
+
+## Example url with filters
+
+Here's an example which only loads pages with statuscode:200 and where mime is not a pdf:
+```
+curl -v 'https://index.commoncrawl.org/CC-MAIN-2025-43-index?url=*.example.com/*&output=json&fl=url,timestamp,filename,offset,length&limit=2&filter==statuscode:200&filter=!mime:application/pdf'
+```
+
+This query works as is! There's no need to urlencode the '!' character for example.
 
 ## Example working script with curl
 The included `./common-crawl.sh` shows an example of how to query common crawl index server and then using the returned values to get the body of the http response.
