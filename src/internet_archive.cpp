@@ -298,12 +298,6 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 			}
 			bind_data->collapse = kv.second.GetValue<string>();
 			fprintf(stderr, "[DEBUG] CDX API collapse set to: %s\n", bind_data->collapse.c_str());
-		} else if (kv.first == "skip") {
-			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
-				throw BinderException("internet_archive skip parameter must be an integer");
-			}
-			bind_data->offset = kv.second.GetValue<int64_t>();
-			fprintf(stderr, "[DEBUG] CDX API offset set to: %lu\n", (unsigned long)bind_data->offset);
 		} else {
 			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
 		}
@@ -1149,7 +1143,6 @@ void RegisterInternetArchiveFunction(ExtensionLoader &loader) {
 	// Add named parameters
 	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
 	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
-	ia_func.named_parameters["skip"] = LogicalType::BIGINT;  // CDX API &offset= parameter (skip is used since offset is reserved)
 
 	internet_archive_set.AddFunction(ia_func);
 
