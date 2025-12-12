@@ -109,6 +109,9 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 
 	try {
 		DUCKDB_LOG_DEBUG(context, "Opening CDX URL +%.0fms", ElapsedMs());
+		// Set force_download to skip HEAD request
+		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+
 		// Use FileSystem to fetch the CDX data
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(cdx_url, FileFlags::FILE_FLAGS_READ);
@@ -197,6 +200,9 @@ static WARCResponse FetchWARCResponse(ClientContext &context, const CDXRecord &r
 	try {
 		// Construct the WARC URL
 		string warc_url = "https://data.commoncrawl.org/" + record.filename;
+
+		// Set force_download to skip HEAD request
+		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
 
 		// Get the file system from the database context
 		auto &fs = FileSystem::GetFileSystem(context);

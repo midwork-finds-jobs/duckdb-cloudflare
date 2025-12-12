@@ -151,6 +151,9 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 	out_cdx_url = cdx_url;
 
 	try {
+		// Set force_download to skip HEAD request
+		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(cdx_url, FileFlags::FILE_FLAGS_READ);
 
@@ -248,6 +251,9 @@ static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &
 		// Construct the download URL with id_ suffix to get raw content
 		string download_url = "https://web.archive.org/web/" + record.timestamp + "id_/" + record.original;
 		DUCKDB_LOG_DEBUG(context, "Fetching archived page: %s", download_url.c_str());
+
+		// Set force_download to skip HEAD request
+		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
 
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);
