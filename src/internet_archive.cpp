@@ -1379,23 +1379,39 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 // DISTINCT ON PUSHDOWN OPTIMIZER
 // ========================================
 
-// Helper to check if a DISTINCT ON targets a specific column by name
-static bool IsDistinctOnColumn(const LogicalDistinct &distinct, const string &column_name) {
+// Helper to check if a DISTINCT ON targets the digest column
+// We need to match by column index since names are internal bindings like #[1.5]
+static bool IsDistinctOnDigest(const LogicalDistinct &distinct, const LogicalGet &get) {
 	if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
 		return false;
 	}
+
+	// Find the index of digest column in the GET node
+	idx_t digest_col_idx = DConstants::INVALID_INDEX;
+	auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
+	for (idx_t i = 0; i < bind_data.column_names.size(); i++) {
+		if (bind_data.column_names[i] == "digest") {
+			digest_col_idx = i;
+			break;
+		}
+	}
+	if (digest_col_idx == DConstants::INVALID_INDEX) {
+		return false;
+	}
+
+	// Get column IDs from GET node
+	auto &column_ids = get.GetColumnIds();
+
 	// Check each distinct target
 	for (const auto &target : distinct.distinct_targets) {
-		if (target->GetExpressionClass() == ExpressionClass::BOUND_REF) {
-			auto &bound_ref = target->Cast<BoundReferenceExpression>();
-			// Check alias (which contains the column name in DuckDB)
-			if (bound_ref.alias == column_name) {
-				return true;
-			}
-		} else if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 			auto &col_ref = target->Cast<BoundColumnRefExpression>();
-			if (col_ref.GetName() == column_name || col_ref.alias == column_name) {
-				return true;
+			// Check if this references the digest column
+			// The column_ids maps projected indices to original column indices
+			for (idx_t i = 0; i < column_ids.size(); i++) {
+				if (column_ids[i].GetPrimaryIndex() == digest_col_idx && col_ref.binding.column_index == i) {
+					return true;
+				}
 			}
 		}
 	}
@@ -1410,23 +1426,13 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 
 		// Only handle DISTINCT ON, not regular DISTINCT
 		if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
-			// Recurse into children
 			for (auto &child : op->children) {
 				OptimizeWaybackMachineDistinctOnPushdown(child);
 			}
 			return;
 		}
 
-		// Check if this is DISTINCT ON(digest)
-		if (!IsDistinctOnColumn(distinct, "digest")) {
-			// Not digest, recurse
-			for (auto &child : op->children) {
-				OptimizeWaybackMachineDistinctOnPushdown(child);
-			}
-			return;
-		}
-
-		// Find the GET node (skip projections, filters)
+		// Find the GET node first (skip projections, filters)
 		reference<LogicalOperator> child = *op->children[0];
 		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION ||
 		       child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
@@ -1448,14 +1454,19 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
+		// Now check if DISTINCT ON targets the digest column
+		if (!IsDistinctOnDigest(distinct, get)) {
+			for (auto &c : op->children) {
+				OptimizeWaybackMachineDistinctOnPushdown(c);
+			}
+			return;
+		}
+
 		// Found DISTINCT ON(digest) over wayback_machine!
 		// Set collapse parameter in bind_data
 		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 		if (bind_data.collapse.empty()) {
 			bind_data.collapse = "digest";
-			// Note: We keep the DISTINCT ON in the plan because the CDX API collapse
-			// returns results but they may not be perfectly deduplicated when combined
-			// with other filters. DuckDB's DISTINCT ON ensures correctness.
 		}
 
 		// Recurse into children
