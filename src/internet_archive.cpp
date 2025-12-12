@@ -1,6 +1,7 @@
 #include "web_archive_cdx_utils.hpp"
 #include <set>
 #include <thread>
+#include <unordered_map>
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -1379,46 +1380,69 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 // DISTINCT ON PUSHDOWN OPTIMIZER
 // ========================================
 
-// Helper to check if a DISTINCT ON targets the digest column
-// We need to match by column index since names are internal bindings like #[1.5]
-static bool IsDistinctOnDigest(const LogicalDistinct &distinct, const LogicalGet &get) {
+// Columns that support CDX collapse parameter
+// Maps DuckDB column name to CDX API field name
+static const std::unordered_map<string, string> COLLAPSE_COLUMNS = {
+    {"digest", "digest"}, {"timestamp", "timestamp"}, {"length", "length"},    {"statuscode", "statuscode"},
+    {"urlkey", "urlkey"}, {"url", "original"},        {"mimetype", "mimetype"}};
+
+// Helper to check if a DISTINCT ON targets a collapsible column
+// Returns the CDX API field name if found, empty string otherwise
+static string GetDistinctOnCollapseField(const LogicalDistinct &distinct, const LogicalGet &get) {
 	if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
-		return false;
+		return "";
 	}
 
-	// Find the index of digest column in the GET node
-	idx_t digest_col_idx = DConstants::INVALID_INDEX;
 	auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
-	for (idx_t i = 0; i < bind_data.column_names.size(); i++) {
-		if (bind_data.column_names[i] == "digest") {
-			digest_col_idx = i;
-			break;
+	auto &column_ids = get.GetColumnIds();
+
+	// Find all collapsible columns in the projection
+	std::unordered_map<idx_t, string> orig_col_to_cdx;
+	for (idx_t i = 0; i < column_ids.size(); i++) {
+		idx_t orig_idx = column_ids[i].GetPrimaryIndex();
+		if (orig_idx < bind_data.column_names.size()) {
+			const string &col_name = bind_data.column_names[orig_idx];
+			auto it = COLLAPSE_COLUMNS.find(col_name);
+			if (it != COLLAPSE_COLUMNS.end()) {
+				orig_col_to_cdx[orig_idx] = it->second;
+			}
 		}
 	}
-	if (digest_col_idx == DConstants::INVALID_INDEX) {
-		return false;
-	}
-
-	// Get column IDs from GET node
-	auto &column_ids = get.GetColumnIds();
 
 	// Check each distinct target
 	for (const auto &target : distinct.distinct_targets) {
 		if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 			auto &col_ref = target->Cast<BoundColumnRefExpression>();
-			// Check if this references the digest column
-			// The column_ids maps projected indices to original column indices
+			idx_t binding_col = col_ref.binding.column_index;
+
+			// Try mapping binding directly to column_ids position
+			if (binding_col < column_ids.size()) {
+				idx_t orig_col_idx = column_ids[binding_col].GetPrimaryIndex();
+				auto it = orig_col_to_cdx.find(orig_col_idx);
+				if (it != orig_col_to_cdx.end()) {
+					return it->second;
+				}
+			}
+
+			// Also try: binding might be referencing a different ordering
+			// Search for a collapsible column that matches the binding
 			for (idx_t i = 0; i < column_ids.size(); i++) {
-				if (column_ids[i].GetPrimaryIndex() == digest_col_idx && col_ref.binding.column_index == i) {
-					return true;
+				idx_t orig_idx = column_ids[i].GetPrimaryIndex();
+				// If this original column is collapsible and matches our expected pattern
+				auto it = orig_col_to_cdx.find(orig_idx);
+				if (it != orig_col_to_cdx.end()) {
+					// Check if only one collapsible column exists - if so, use it
+					if (orig_col_to_cdx.size() == 1) {
+						return it->second;
+					}
 				}
 			}
 		}
 	}
-	return false;
+	return "";
 }
 
-// Optimizer function to push down DISTINCT ON(digest) to collapse parameter
+// Optimizer function to push down DISTINCT ON to collapse parameter
 void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 	// Handle DISTINCT ON
 	if (op->type == LogicalOperatorType::LOGICAL_DISTINCT) {
@@ -1454,19 +1478,19 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
-		// Now check if DISTINCT ON targets the digest column
-		if (!IsDistinctOnDigest(distinct, get)) {
+		// Check if DISTINCT ON targets a collapsible column
+		string collapse_field = GetDistinctOnCollapseField(distinct, get);
+		if (collapse_field.empty()) {
 			for (auto &c : op->children) {
 				OptimizeWaybackMachineDistinctOnPushdown(c);
 			}
 			return;
 		}
 
-		// Found DISTINCT ON(digest) over wayback_machine!
-		// Set collapse parameter in bind_data
+		// Found DISTINCT ON over wayback_machine with collapsible column!
 		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 		if (bind_data.collapse.empty()) {
-			bind_data.collapse = "digest";
+			bind_data.collapse = collapse_field;
 		}
 
 		// Recurse into children
