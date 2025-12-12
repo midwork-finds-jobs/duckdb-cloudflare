@@ -36,8 +36,9 @@ struct WaybackMachineBindData : public TableFunctionData {
 	bool fast_latest; // Use fastLatest=true for efficient ORDER BY timestamp DESC
 	bool order_desc;  // ORDER BY timestamp DESC detected
 	idx_t offset;     // offset parameter for pagination
+	bool debug;       // Show cdx_url column when true
 
-	WaybackMachineBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0) {}
+	WaybackMachineBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0), debug(false) {}
 };
 
 // Structure to hold global state for wayback_machine table function
@@ -306,6 +307,12 @@ static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, Table
 			}
 			bind_data->collapse = kv.second.GetValue<string>();
 			DUCKDB_LOG_DEBUG(context, "CDX API collapse set to: %s", bind_data->collapse.c_str());
+		} else if (kv.first == "debug") {
+			if (kv.second.type().id() != LogicalTypeId::BOOLEAN) {
+				throw BinderException("wayback_machine debug parameter must be a boolean");
+			}
+			bind_data->debug = kv.second.GetValue<bool>();
+			DUCKDB_LOG_DEBUG(context, "Debug mode: %s", bind_data->debug ? "true" : "false");
 		} else {
 			throw BinderException("Unknown parameter '%s' for wayback_machine", kv.first.c_str());
 		}
@@ -346,9 +353,15 @@ static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, Table
 	response_children.push_back(make_pair("body", LogicalType::BLOB));
 	return_types.push_back(LogicalType::STRUCT(response_children));
 
-	// Add cdx_url column (the CDX API URL used for the query)
-	names.push_back("cdx_url");
+	// Add archive_url column (Wayback Machine playback URL)
+	names.push_back("archive_url");
 	return_types.push_back(LogicalType::VARCHAR);
+
+	// Add cdx_url column only when debug := true
+	if (bind_data->debug) {
+		names.push_back("cdx_url");
+		return_types.push_back(LogicalType::VARCHAR);
+	}
 
 	// Don't set fetch_response here - will be determined by projection pushdown
 	bind_data->fetch_response = false;
@@ -399,18 +412,26 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 			} else if (col_name == "response") {
 				bind_data.fetch_response = true;
 				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
+			} else if (col_name == "archive_url") {
+				// archive_url needs timestamp and original (url) fields
+				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "timestamp") == bind_data.fields_needed.end()) {
+					bind_data.fields_needed.push_back("timestamp");
+				}
+				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "original") == bind_data.fields_needed.end()) {
+					bind_data.fields_needed.push_back("original");
+				}
 			} else if (col_name == "cdx_url") {
 				// cdx_url doesn't need any CDX fields
 			}
 		}
 	}
 
-	// Check if only cdx_url is selected (fields_needed is empty and no response)
-	bind_data.cdx_url_only = bind_data.fields_needed.empty() && !bind_data.fetch_response;
+	// Check if only cdx_url is selected (debug mode, fields_needed is empty and no response)
+	bind_data.cdx_url_only = bind_data.debug && bind_data.fields_needed.empty() && !bind_data.fetch_response;
 
 	if (bind_data.cdx_url_only) {
 		// Only cdx_url is selected - build URL without network request
-		DUCKDB_LOG_DEBUG(context, "Only cdx_url selected - skipping network request");
+		DUCKDB_LOG_DEBUG(context, "Only cdx_url selected (debug mode) - skipping network request");
 		bind_data.cdx_url = BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type,
 		                                           bind_data.fields_needed, bind_data.cdx_filters,
 		                                           bind_data.from_date, bind_data.to_date, bind_data.max_results,
@@ -507,6 +528,11 @@ static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data,
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
+				} else if (col_name == "archive_url") {
+					// Construct Wayback Machine playback URL: https://web.archive.org/web/{timestamp}/{url}
+					string archive_url = "https://web.archive.org/web/" + record.timestamp + "/" + record.original;
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], archive_url);
 				} else if (col_name == "cdx_url") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
@@ -1141,7 +1167,7 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const WaybackMachineBindData
 		}
 
 		// Also check by column binding - timestamp is column index 1 in our schema
-		// (url=0, timestamp=1, urlkey=2, mimetype=3, statuscode=4, digest=5, length=6, response=7, cdx_url=8)
+		// (url=0, timestamp=1, urlkey=2, mimetype=3, statuscode=4, digest=5, length=6, response=7, archive_url=8, cdx_url=9 if debug)
 		if (col_ref.binding.column_index == 1) {
 			return true;
 		}
@@ -1290,6 +1316,7 @@ void RegisterWaybackMachineFunction(ExtensionLoader &loader) {
 	// Add named parameters
 	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
 	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
+	ia_func.named_parameters["debug"] = LogicalType::BOOLEAN;
 
 	wayback_machine_set.AddFunction(ia_func);
 

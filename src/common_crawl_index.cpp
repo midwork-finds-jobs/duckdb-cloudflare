@@ -30,10 +30,12 @@ struct CommonCrawlBindData : public TableFunctionData {
 	timestamp_t timestamp_from; // Timestamp range filter (from collinfo.json lookup)
 	timestamp_t timestamp_to;   // Timestamp range filter (from collinfo.json lookup)
 	bool has_timestamp_filter;  // Whether timestamp filters were applied
+	bool debug;       // Show cdx_url column when true
+	string cdx_url;   // The constructed CDX API URL (populated after query)
 
 	// Default CDX limit set to 100 to prevent fetching too many results
 	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(100),
-	                                     timestamp_from(timestamp_t(0)), timestamp_to(timestamp_t(0)), has_timestamp_filter(false) {}
+	                                     timestamp_from(timestamp_t(0)), timestamp_to(timestamp_t(0)), has_timestamp_filter(false), debug(false) {}
 };
 
 // Structure to hold global state for the table function
@@ -56,7 +58,7 @@ struct CommonCrawlGlobalState : public GlobalTableFunctionState {
 // Helper function to query CDX API using FileSystem
 static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index_name, const string &url_pattern,
                                       const vector<string> &fields_needed, const vector<string> &cdx_filters, idx_t max_results,
-                                      timestamp_t ts_from = timestamp_t(0), timestamp_t ts_to = timestamp_t(0)) {
+                                      timestamp_t ts_from, timestamp_t ts_to, string &out_cdx_url) {
 	DUCKDB_LOG_DEBUG(context, "QueryCDXAPI started +%.0fms", ElapsedMs());
 	vector<CDXRecord> records;
 
@@ -106,6 +108,9 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 
 	// Debug: print the final CDX URL
 	DUCKDB_LOG_DEBUG(context, "CDX URL: %s +%.0fms", cdx_url.c_str(), ElapsedMs());
+
+	// Store the CDX URL for output
+	out_cdx_url = cdx_url;
 
 	try {
 		DUCKDB_LOG_DEBUG(context, "Opening CDX URL +%.0fms", ElapsedMs());
@@ -270,6 +275,12 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 			}
 			bind_data->max_results = kv.second.GetValue<int64_t>();
 			DUCKDB_LOG_DEBUG(context, "CDX API max_results set to: %lu", (unsigned long)bind_data->max_results);
+		} else if (kv.first == "debug") {
+			if (kv.second.type().id() != LogicalTypeId::BOOLEAN) {
+				throw BinderException("common_crawl_index debug parameter must be a boolean");
+			}
+			bind_data->debug = kv.second.GetValue<bool>();
+			DUCKDB_LOG_DEBUG(context, "Debug mode: %s", bind_data->debug ? "true" : "false");
 		} else {
 			throw BinderException("Unknown parameter '%s' for common_crawl_index", kv.first.c_str());
 		}
@@ -328,6 +339,12 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	response_children.push_back(make_pair("headers", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
 	response_children.push_back(make_pair("http_version", LogicalType::VARCHAR));
 	return_types.push_back(LogicalType::STRUCT(response_children));
+
+	// Add cdx_url column only when debug := true
+	if (bind_data->debug) {
+		names.push_back("cdx_url");
+		return_types.push_back(LogicalType::VARCHAR);
+	}
 
 	// Enable response fetching (implemented with HTTP range requests + gzip decompression)
 	// Note: This will fetch WARC files which can be slow for large result sets
@@ -456,14 +473,19 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 		// IN clause detected: query each crawl_id in parallel and combine results
 		DUCKDB_LOG_DEBUG(context, "Launching %lu parallel CDX API requests +%.0fms", (unsigned long)bind_data.crawl_ids.size(), ElapsedMs());
 
+		// For parallel queries, store each CDX URL
+		vector<string> cdx_urls;
+		cdx_urls.resize(bind_data.crawl_ids.size());
+
 		std::vector<std::future<vector<CDXRecord>>> futures;
 		futures.reserve(bind_data.crawl_ids.size());
 
 		// Launch async requests for each crawl_id
-		for (const auto &crawl_id : bind_data.crawl_ids) {
-			futures.push_back(std::async(std::launch::async, [&context, crawl_id, url_pattern, &needed_fields, &bind_data]() {
+		for (size_t i = 0; i < bind_data.crawl_ids.size(); i++) {
+			const auto &crawl_id = bind_data.crawl_ids[i];
+			futures.push_back(std::async(std::launch::async, [&context, crawl_id, url_pattern, &needed_fields, &bind_data, &cdx_urls, i]() {
 				return QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results,
-				                   bind_data.timestamp_from, bind_data.timestamp_to);
+				                   bind_data.timestamp_from, bind_data.timestamp_to, cdx_urls[i]);
 			}));
 		}
 
@@ -473,11 +495,17 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 			state->records.insert(state->records.end(), records.begin(), records.end());
 		}
 
+		// Store all CDX URLs (joined with newlines for debug output)
+		for (size_t i = 0; i < cdx_urls.size(); i++) {
+			if (i > 0) bind_data.cdx_url += "\n";
+			bind_data.cdx_url += cdx_urls[i];
+		}
+
 		DUCKDB_LOG_DEBUG(context, "All parallel requests completed, total records: %lu +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	} else {
 		// Single crawl_id: use index_name
 		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results,
-		                             bind_data.timestamp_from, bind_data.timestamp_to);
+		                             bind_data.timestamp_from, bind_data.timestamp_to, bind_data.cdx_url);
 		DUCKDB_LOG_DEBUG(context, "QueryCDXAPI returned %lu records +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	}
 
@@ -635,6 +663,9 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
+				} else if (col_name == "cdx_url") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
 				}
 			} catch (const std::exception &ex) {
 				DUCKDB_LOG_ERROR(context, "Failed to process column %s for row %lu: %s",
@@ -1421,8 +1452,9 @@ void RegisterCommonCrawlFunction(ExtensionLoader &loader) {
 	func.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
 	func.projection_pushdown = true;
 
-	// Add named parameter
+	// Add named parameters
 	func.named_parameters["max_results"] = LogicalType::BIGINT;
+	func.named_parameters["debug"] = LogicalType::BOOLEAN;
 
 	common_crawl_set.AddFunction(func);
 

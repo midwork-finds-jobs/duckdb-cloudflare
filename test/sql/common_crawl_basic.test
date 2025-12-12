@@ -14,12 +14,31 @@ true
 statement ok
 SELECT * FROM common_crawl_index() LIMIT 0;
 
-# Test that the function returns the expected columns
+# Test that the function returns the expected columns (cdx_url hidden by default)
 query I
 SELECT column_name FROM (
     DESCRIBE SELECT * FROM common_crawl_index()
 ) ORDER BY column_name;
 ----
+crawl_id
+digest
+filename
+length
+mimetype
+offset
+response
+statuscode
+timestamp
+url
+warc
+
+# Test that cdx_url column is shown when debug := true
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT * FROM common_crawl_index(debug := true)
+) ORDER BY column_name;
+----
+cdx_url
 crawl_id
 digest
 filename

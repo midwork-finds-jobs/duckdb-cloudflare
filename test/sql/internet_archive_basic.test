@@ -8,12 +8,29 @@ require web_archive_cdx
 statement ok
 SELECT * FROM wayback_machine() LIMIT 0;
 
-# Test that the function returns the expected columns
+# Test that the function returns the expected columns (cdx_url hidden by default)
 query I
 SELECT column_name FROM (
     DESCRIBE SELECT * FROM wayback_machine()
 ) ORDER BY column_name;
 ----
+archive_url
+digest
+length
+mimetype
+response
+statuscode
+timestamp
+url
+urlkey
+
+# Test that cdx_url column is shown when debug := true
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT * FROM wayback_machine(debug := true)
+) ORDER BY column_name;
+----
+archive_url
 cdx_url
 digest
 length
@@ -126,4 +143,18 @@ statement ok
 SELECT url, timestamp FROM wayback_machine()
 WHERE url = 'archive.org'
 ORDER BY timestamp DESC
+LIMIT 0;
+
+# Test archive_url column type
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT archive_url FROM wayback_machine()
+);
+----
+archive_url	VARCHAR
+
+# Test archive_url column is selectable
+statement ok
+SELECT archive_url FROM wayback_machine()
+WHERE url = 'archive.org'
 LIMIT 0;

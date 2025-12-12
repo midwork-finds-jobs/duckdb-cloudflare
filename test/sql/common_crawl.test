@@ -64,13 +64,13 @@ warc	STRUCT("version" VARCHAR, headers MAP(VARCHAR, VARCHAR))
 statement ok
 SELECT * FROM wayback_machine() LIMIT 0;
 
-# Test internet_archive column list
+# Test wayback_machine column list (cdx_url hidden by default)
 query I
 SELECT column_name FROM (
     DESCRIBE SELECT * FROM wayback_machine()
 ) ORDER BY column_name;
 ----
-cdx_url
+archive_url
 digest
 length
 mimetype
