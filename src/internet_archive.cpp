@@ -1,5 +1,6 @@
 #include "web_archive_cdx_utils.hpp"
 #include <set>
+#include <thread>
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
@@ -242,43 +243,61 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 // ARCHIVED PAGE FETCHING
 // ========================================
 
-// Helper function to fetch archived page from Internet Archive
+// Helper function to fetch archived page from Internet Archive with retry
 static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &record) {
 	if (record.timestamp.empty() || record.original.empty()) {
 		return "[Error: Missing timestamp or URL]";
 	}
 
-	try {
-		// Construct the download URL with id_ suffix to get raw content
-		string download_url = "https://web.archive.org/web/" + record.timestamp + "id_/" + record.original;
-		DUCKDB_LOG_DEBUG(context, "Fetching archived page: %s", download_url.c_str());
+	// Construct the download URL with id_ suffix to get raw content
+	string download_url = "https://web.archive.org/web/" + record.timestamp + "id_/" + record.original;
 
-		// Set force_download to skip HEAD request
-		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+	// Retry with exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+	const int max_retries = 5;
+	int retry_delay_ms = 100;
+	string last_error;
 
-		auto &fs = FileSystem::GetFileSystem(context);
-		auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);
-
-		// Read the response
-		string response_data;
-		const idx_t buffer_size = 8192;
-		auto buffer = unique_ptr<char[]>(new char[buffer_size]);
-
-		while (true) {
-			int64_t bytes_read = file_handle->Read(buffer.get(), buffer_size);
-			if (bytes_read <= 0) {
-				break;
+	for (int attempt = 0; attempt < max_retries; attempt++) {
+		try {
+			if (attempt > 0) {
+				DUCKDB_LOG_DEBUG(context, "Retry %d/%d after %dms for: %s", attempt, max_retries - 1, retry_delay_ms / 2, download_url.c_str());
+				std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+				retry_delay_ms *= 2; // Exponential backoff
+			} else {
+				DUCKDB_LOG_DEBUG(context, "Fetching archived page: %s", download_url.c_str());
 			}
-			response_data.append(buffer.get(), bytes_read);
+
+			// Set force_download to skip HEAD request
+			context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+
+			auto &fs = FileSystem::GetFileSystem(context);
+			auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);
+
+			// Read the response
+			string response_data;
+			const idx_t buffer_size = 8192;
+			auto buffer = unique_ptr<char[]>(new char[buffer_size]);
+
+			while (true) {
+				int64_t bytes_read = file_handle->Read(buffer.get(), buffer_size);
+				if (bytes_read <= 0) {
+					break;
+				}
+				response_data.append(buffer.get(), bytes_read);
+			}
+
+			return response_data;
+
+		} catch (Exception &ex) {
+			last_error = ex.what();
+			// Continue to retry on connection errors
+		} catch (std::exception &ex) {
+			last_error = ex.what();
+			// Continue to retry on connection errors
 		}
-
-		return response_data;
-
-	} catch (Exception &ex) {
-		return "[Error fetching archived page: " + string(ex.what()) + "]";
-	} catch (std::exception &ex) {
-		return "[Error fetching archived page: " + string(ex.what()) + "]";
 	}
+
+	return "[Error fetching archived page after " + to_string(max_retries) + " retries: " + last_error + "]";
 }
 
 // ========================================

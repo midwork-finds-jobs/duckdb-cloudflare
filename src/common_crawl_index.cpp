@@ -1,4 +1,5 @@
 #include "web_archive_cdx_utils.hpp"
+#include <thread>
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -194,7 +195,7 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 // WARC FETCHING
 // ========================================
 
-// Helper function to fetch WARC response using FileSystem API
+// Helper function to fetch WARC response using FileSystem API with retry
 static WARCResponse FetchWARCResponse(ClientContext &context, const CDXRecord &record) {
 	WARCResponse result;
 
@@ -202,56 +203,72 @@ static WARCResponse FetchWARCResponse(ClientContext &context, const CDXRecord &r
 		return result; // Invalid record - return empty
 	}
 
-	try {
-		// Construct the WARC URL
-		string warc_url = "https://data.commoncrawl.org/" + record.filename;
+	// Construct the WARC URL
+	string warc_url = "https://data.commoncrawl.org/" + record.filename;
 
-		// Set force_download to skip HEAD request
-		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+	// Retry with exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+	const int max_retries = 5;
+	int retry_delay_ms = 100;
+	string last_error;
 
-		// Get the file system from the database context
-		auto &fs = FileSystem::GetFileSystem(context);
+	for (int attempt = 0; attempt < max_retries; attempt++) {
+		try {
+			if (attempt > 0) {
+				DUCKDB_LOG_DEBUG(context, "Retry %d/%d after %dms for WARC: %s", attempt, max_retries - 1, retry_delay_ms / 2, warc_url.c_str());
+				std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+				retry_delay_ms *= 2; // Exponential backoff
+			}
 
-		// Open the file through httpfs (HTTP URLs are handled when httpfs is loaded)
-		auto file_handle = fs.OpenFile(warc_url, FileFlags::FILE_FLAGS_READ);
+			// Set force_download to skip HEAD request
+			context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
 
-		// Allocate buffer for the compressed data
-		auto buffer = unique_ptr<char[]>(new char[record.length]);
+			// Get the file system from the database context
+			auto &fs = FileSystem::GetFileSystem(context);
 
-		// Seek to the offset and read the specified length
-		// httpfs should translate this into HTTP Range request: bytes=offset-(offset+length-1)
-		file_handle->Seek(record.offset);
-		int64_t bytes_read = file_handle->Read(buffer.get(), record.length);
+			// Open the file through httpfs (HTTP URLs are handled when httpfs is loaded)
+			auto file_handle = fs.OpenFile(warc_url, FileFlags::FILE_FLAGS_READ);
 
-		if (bytes_read <= 0) {
-			result.body = "[Error: Failed to read data from WARC file]";
-			return result;
+			// Allocate buffer for the compressed data
+			auto buffer = unique_ptr<char[]>(new char[record.length]);
+
+			// Seek to the offset and read the specified length
+			// httpfs should translate this into HTTP Range request: bytes=offset-(offset+length-1)
+			file_handle->Seek(record.offset);
+			int64_t bytes_read = file_handle->Read(buffer.get(), record.length);
+
+			if (bytes_read <= 0) {
+				last_error = "Failed to read data from WARC file";
+				continue; // Retry
+			}
+
+			// The data we read is gzip compressed
+			// We need to decompress it to get the WARC content
+			string decompressed = DecompressGzip(buffer.get(), bytes_read);
+
+			// Parse the WARC format to extract HTTP response headers and body
+			if (decompressed.find("[Error") == 0) {
+				// If decompression returned an error message, put it in body
+				result.body = decompressed;
+				return result;
+			}
+
+			return ParseWARCResponse(decompressed);
+
+		} catch (Exception &ex) {
+			last_error = ex.what();
+			// Continue to retry on connection errors
+		} catch (std::exception &ex) {
+			last_error = ex.what();
+			// Continue to retry on connection errors
+		} catch (...) {
+			last_error = "Unknown error";
+			// Continue to retry
 		}
-
-		// The data we read is gzip compressed
-		// We need to decompress it to get the WARC content
-		string decompressed = DecompressGzip(buffer.get(), bytes_read);
-
-		// Parse the WARC format to extract HTTP response headers and body
-		if (decompressed.find("[Error") == 0) {
-			// If decompression returned an error message, put it in body
-			result.body = decompressed;
-			return result;
-		}
-
-		return ParseWARCResponse(decompressed);
-
-	} catch (Exception &ex) {
-		// Return error message in body for debugging
-		result.body = "[Error fetching WARC: " + string(ex.what()) + "]";
-		return result;
-	} catch (std::exception &ex) {
-		result.body = "[Error fetching WARC: " + string(ex.what()) + "]";
-		return result;
-	} catch (...) {
-		result.body = "[Unknown error fetching WARC]";
-		return result;
 	}
+
+	// All retries failed
+	result.body = "[Error fetching WARC after " + to_string(max_retries) + " retries: " + last_error + "]";
+	return result;
 }
 
 // ========================================
