@@ -592,11 +592,16 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 		std::vector<std::future<WARCResponse>> warc_futures;
 		warc_futures.reserve(chunk_size);
 
+		// Start timer for timeout tracking
+		auto fetch_start = std::chrono::steady_clock::now();
+		int timeout = bind_data.timeout_seconds;
+
 		// Launch parallel WARC fetches
 		for (idx_t i = 0; i < chunk_size; i++) {
 			auto &record = gstate.records[gstate.current_position + i];
-			warc_futures.push_back(
-			    std::async(std::launch::async, [&context, record]() { return FetchWARCResponse(context, record); }));
+			warc_futures.push_back(std::async(std::launch::async, [&context, record, fetch_start, timeout]() {
+				return FetchWARCResponse(context, record, fetch_start, timeout);
+			}));
 		}
 
 		// Collect results
