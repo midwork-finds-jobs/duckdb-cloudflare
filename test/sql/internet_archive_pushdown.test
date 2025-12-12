@@ -323,3 +323,70 @@ LIMIT 10 OFFSET 0;
 ----
 true
 
+# ============================================
+# IN EXPRESSION PUSHDOWN TESTS
+# ============================================
+
+# Test statuscode IN pushdown - converts to regex alternation
+query I
+SELECT cdx_url LIKE '%filter=statuscode:(200|301|302)%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND statuscode IN (200, 301, 302)
+LIMIT 1;
+----
+true
+
+# Test statuscode IN with two values
+query I
+SELECT cdx_url LIKE '%filter=statuscode:(200|404)%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND statuscode IN (200, 404)
+LIMIT 1;
+----
+true
+
+# Test mimetype IN pushdown - converts to regex alternation
+query I
+SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain)%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND mimetype IN ('text/html', 'text/plain')
+LIMIT 1;
+----
+true
+
+# Test mimetype IN with three values
+query I
+SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain|application/json)%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND mimetype IN ('text/html', 'text/plain', 'application/json')
+LIMIT 1;
+----
+true
+
+# Test combined statuscode IN and mimetype IN
+query I
+SELECT
+    cdx_url LIKE '%filter=statuscode:(200|301)%'
+    AND cdx_url LIKE '%filter=mimetype:(text/html|text/plain)%'
+FROM internet_archive()
+WHERE url = 'example.com'
+  AND statuscode IN (200, 301)
+  AND mimetype IN ('text/html', 'text/plain')
+LIMIT 1;
+----
+true
+
+# Test statuscode IN combined with other filters
+query I
+SELECT
+    cdx_url LIKE '%filter=statuscode:(200|301|302)%'
+    AND cdx_url LIKE '%&from=2024%'
+    AND cdx_url LIKE '%&limit=10%'
+FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND statuscode IN (200, 301, 302)
+  AND timestamp > '2024-01-01'
+LIMIT 10;
+----
+true
+

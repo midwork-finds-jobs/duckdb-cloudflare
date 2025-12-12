@@ -1,0 +1,137 @@
+# name: test/sql/common_crawl_errors.test
+# description: Test error handling and edge cases
+# group: [common_crawl]
+
+require common_crawl
+
+# Test error: unknown named parameter for common_crawl_index
+statement error
+SELECT * FROM common_crawl_index(unknown_param := 10);
+----
+Invalid named parameter
+
+# Test error: unknown named parameter for internet_archive
+statement error
+SELECT * FROM internet_archive(unknown_param := 10);
+----
+Invalid named parameter
+
+# Test error: wrong type for max_results (string instead of integer)
+statement error
+SELECT * FROM common_crawl_index(max_results := 'not_a_number');
+----
+
+# Test error: wrong type for max_results in internet_archive
+statement error
+SELECT * FROM internet_archive(max_results := 'not_a_number');
+----
+
+# Test error: negative max_results (should work but return 0 results)
+statement ok
+SELECT * FROM common_crawl_index(max_results := 0) LIMIT 0;
+
+# Test edge case: max_results = 1
+statement ok
+SELECT * FROM common_crawl_index(max_results := 1) LIMIT 0;
+
+# Test edge case: very large max_results
+statement ok
+SELECT * FROM common_crawl_index(max_results := 100000) LIMIT 0;
+
+# Test accessing non-existent MAP key (should return NULL)
+statement ok
+SELECT response.headers['NonExistentHeader']
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test LIMIT 0 (no data fetched)
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM common_crawl_index()
+    LIMIT 0
+);
+----
+0
+
+# Test empty result set with impossible filter
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM common_crawl_index()
+    WHERE statuscode = 999
+      AND mimetype = 'impossible/type'
+    LIMIT 0
+);
+----
+0
+
+# Test accessing STRUCT field on potentially NULL response
+statement ok
+SELECT url, response.body
+FROM common_crawl_index()
+WHERE response.body IS NOT NULL
+LIMIT 0;
+
+# Test multiple unknown parameters (only first error shown)
+statement error
+SELECT * FROM common_crawl_index(param1 := 1, param2 := 2);
+----
+Invalid named parameter
+
+# Test valid and invalid parameter mixed
+statement error
+SELECT * FROM common_crawl_index(max_results := 10, invalid := 20);
+----
+Invalid named parameter
+
+# Test case sensitivity in column names (should work)
+statement ok
+SELECT URL, STATUSCODE FROM common_crawl_index() LIMIT 0;
+
+# Test accessing deeply nested STRUCT (should work)
+statement ok
+SELECT response.headers['Content-Type']
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test LIMIT with OFFSET (OFFSET not pushed down, applied by DuckDB)
+statement ok
+SELECT * FROM common_crawl_index()
+LIMIT 0 OFFSET 2;
+
+# Test empty crawl_id filter
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM common_crawl_index()
+    WHERE crawl_id = ''
+    LIMIT 0
+);
+----
+0
+
+# Test empty url filter
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM common_crawl_index()
+    WHERE url = ''
+    LIMIT 0
+);
+----
+0
+
+# Test NULL in WHERE clause (should be handled gracefully)
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE statuscode = NULL
+LIMIT 0;
+
+# Test IS NULL on non-nullable columns
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE url IS NULL
+LIMIT 0;
+
+# Test IS NOT NULL on nullable columns
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE response.body IS NOT NULL
+LIMIT 0;

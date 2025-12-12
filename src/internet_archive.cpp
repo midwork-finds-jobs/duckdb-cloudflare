@@ -555,6 +555,54 @@ static bool TryAddCdxRegexFilter(InternetArchiveBindData &bind_data, const strin
 	return true;
 }
 
+// Helper to handle IN expression for CDX columns (statuscode, mimetype)
+// Converts IN (val1, val2, ...) to regex alternation (val1|val2|...)
+static bool TryHandleInExpression(InternetArchiveBindData &bind_data, BoundOperatorExpression &op,
+                                    const string &col_name, bool is_integer) {
+	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
+		return false;
+	}
+
+	vector<string> values;
+	for (idx_t j = 1; j < op.children.size(); j++) {
+		if (op.children[j]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return false;
+		}
+		auto &const_expr = op.children[j]->Cast<BoundConstantExpression>();
+
+		if (is_integer) {
+			if (const_expr.value.type().id() != LogicalTypeId::INTEGER &&
+			    const_expr.value.type().id() != LogicalTypeId::BIGINT) {
+				return false;
+			}
+			values.push_back(to_string(const_expr.value.GetValue<int32_t>()));
+		} else {
+			if (const_expr.value.type().id() != LogicalTypeId::VARCHAR) {
+				return false;
+			}
+			// Escape regex special chars for string values
+			values.push_back(EscapeRegex(const_expr.value.ToString()));
+		}
+	}
+
+	if (values.empty()) {
+		return false;
+	}
+
+	// Build regex alternation: (val1|val2|val3)
+	string regex_pattern = "(";
+	for (idx_t j = 0; j < values.size(); j++) {
+		if (j > 0) regex_pattern += "|";
+		regex_pattern += values[j];
+	}
+	regex_pattern += ")";
+
+	string filter_str = col_name + ":" + regex_pattern;
+	bind_data.cdx_filters.push_back(filter_str);
+	fprintf(stderr, "[DEBUG +%.0fms] %s IN -> %s\n", ElapsedMs(), col_name.c_str(), filter_str.c_str());
+	return true;
+}
+
 // Filter pushdown for internet_archive
 static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                    vector<unique_ptr<Expression>> &filters) {
@@ -864,6 +912,27 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 			}
 		}
 
+		// Handle IN expressions: statuscode IN (200, 301, 302) or mimetype IN ('text/html', 'text/plain')
+		// DuckDB converts IN to COMPARE_IN operator expression
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
+		    filter->type == ExpressionType::COMPARE_IN) {
+			auto &op = filter->Cast<BoundOperatorExpression>();
+			// First child is the column, rest are the values
+			if (op.children.size() >= 2 &&
+			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+
+				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+				string col_name = col_ref.GetName();
+
+				// statuscode is integer, mimetype is string
+				bool is_integer = (col_name == "statuscode");
+				if (TryHandleInExpression(bind_data, op, col_name, is_integer)) {
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+		}
+
 		// Handle BETWEEN expressions (timestamp BETWEEN x AND y)
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
 			auto &between = filter->Cast<BoundBetweenExpression>();
@@ -914,12 +983,13 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 		if (column_name == "statuscode" &&
 		    (constant.value.type().id() == LogicalTypeId::INTEGER ||
 		     constant.value.type().id() == LogicalTypeId::BIGINT)) {
+			int32_t val = constant.value.GetValue<int32_t>();
 			if (filter->type == ExpressionType::COMPARE_EQUAL) {
-				string filter_str = "statuscode:" + to_string(constant.value.GetValue<int32_t>());
+				string filter_str = "statuscode:" + to_string(val);
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
 			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
-				string filter_str = "!statuscode:" + to_string(constant.value.GetValue<int32_t>());
+				string filter_str = "!statuscode:" + to_string(val);
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
 			}
