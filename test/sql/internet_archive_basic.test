@@ -2,16 +2,16 @@
 # description: Basic tests for internet_archive function
 # group: [internet_archive]
 
-require common_crawl
+require web_archive_cdx
 
 # Test that internet_archive function exists
 statement ok
-SELECT * FROM internet_archive() LIMIT 0;
+SELECT * FROM wayback_machine() LIMIT 0;
 
 # Test that the function returns the expected columns
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT * FROM internet_archive()
+    DESCRIBE SELECT * FROM wayback_machine()
 ) ORDER BY column_name;
 ----
 cdx_url
@@ -27,7 +27,7 @@ urlkey
 # Test column types for basic fields
 query II
 SELECT column_name, column_type FROM (
-    DESCRIBE SELECT * FROM internet_archive()
+    DESCRIBE SELECT * FROM wayback_machine()
 ) WHERE column_name IN ('url', 'statuscode', 'length', 'urlkey')
 ORDER BY column_name;
 ----
@@ -36,26 +36,26 @@ statuscode	INTEGER
 url	VARCHAR
 urlkey	VARCHAR
 
-# Test response column type (BLOB for internet_archive)
+# Test response column type (STRUCT with body for wayback_machine)
 query II
 SELECT column_name, column_type FROM (
-    DESCRIBE SELECT * FROM internet_archive()
+    DESCRIBE SELECT * FROM wayback_machine()
 ) WHERE column_name = 'response';
 ----
-response	BLOB
+response	STRUCT(body BLOB)
 
 # Test named parameter max_results
 statement ok
-SELECT * FROM internet_archive(max_results := 10) LIMIT 0;
+SELECT * FROM wayback_machine(max_results := 10) LIMIT 0;
 
 # Test that function works without parameters (uses default)
 statement ok
-SELECT * FROM internet_archive() LIMIT 0;
+SELECT * FROM wayback_machine() LIMIT 0;
 
 # Test projection - only url column
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT url FROM internet_archive()
+    DESCRIBE SELECT url FROM wayback_machine()
 );
 ----
 url
@@ -63,7 +63,7 @@ url
 # Test projection - multiple columns
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT url, statuscode, timestamp FROM internet_archive()
+    DESCRIBE SELECT url, statuscode, timestamp FROM wayback_machine()
 ) ORDER BY column_name;
 ----
 statuscode
@@ -72,37 +72,37 @@ url
 
 # Test WHERE clause with url (exact match)
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE url = 'archive.org'
 LIMIT 0;
 
 # Test WHERE clause with url LIKE (prefix match)
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE url LIKE 'archive.org/%'
 LIMIT 0;
 
 # Test WHERE clause with url LIKE (domain match)
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE url LIKE '%.archive.org'
 LIMIT 0;
 
 # Test WHERE clause with statuscode
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE statuscode = 200
 LIMIT 0;
 
 # Test WHERE clause with mimetype
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE mimetype = 'text/html'
 LIMIT 0;
 
 # Test multiple WHERE conditions
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE url = 'archive.org'
   AND statuscode = 200
   AND mimetype = 'text/html'
@@ -110,20 +110,20 @@ LIMIT 0;
 
 # Test LIMIT
 statement ok
-SELECT * FROM internet_archive()
+SELECT * FROM wayback_machine()
 WHERE url = 'archive.org'
 LIMIT 0;
 
 # Test accessing response body
 statement ok
-SELECT url, octet_length(response) as size FROM internet_archive()
+SELECT url, octet_length(response.body) as size FROM wayback_machine()
 WHERE url = 'archive.org'
   AND statuscode = 200
 LIMIT 0;
 
 # Test timestamp column
 statement ok
-SELECT url, timestamp FROM internet_archive()
+SELECT url, timestamp FROM wayback_machine()
 WHERE url = 'archive.org'
 ORDER BY timestamp DESC
 LIMIT 0;

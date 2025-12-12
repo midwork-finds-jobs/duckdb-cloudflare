@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class CommonCrawlExtension : public Extension {
+class WebArchiveCdxExtension : public Extension {
 public:
 	void Load(ExtensionLoader &db) override;
 	std::string Name() override;

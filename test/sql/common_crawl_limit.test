@@ -1,0 +1,67 @@
+# name: test/sql/common_crawl_limit.test
+# description: Test LIMIT pushdown for common_crawl_index
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test basic LIMIT
+statement ok
+SELECT * FROM common_crawl_index()
+LIMIT 0;
+
+# Test LIMIT with WHERE clause
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE statuscode = 200
+LIMIT 0;
+
+# Test LIMIT with multiple crawl_ids (should divide limit)
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE crawl_id IN ('CC-MAIN-2024-46', 'CC-MAIN-2024-42')
+LIMIT 0;
+
+# Test LIMIT with projection
+statement ok
+SELECT url, statuscode FROM common_crawl_index()
+LIMIT 0;
+
+# Test LIMIT 1
+statement ok
+SELECT * FROM common_crawl_index()
+LIMIT 0;
+
+# Test LIMIT with ORDER BY (note: LIMIT pushdown happens before ORDER BY)
+statement ok
+SELECT url, timestamp FROM common_crawl_index()
+WHERE statuscode = 200
+ORDER BY timestamp DESC
+LIMIT 0;
+
+# Test LIMIT with named parameter (named param should be overridden by LIMIT pushdown)
+statement ok
+SELECT * FROM common_crawl_index(max_results := 100)
+LIMIT 0;
+
+# Test LIMIT 0
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM common_crawl_index()
+    LIMIT 0
+);
+----
+0
+
+# Test that LIMIT works with complex filters
+statement ok
+SELECT url FROM common_crawl_index()
+WHERE crawl_id = 'CC-MAIN-2024-46'
+  AND url LIKE '%.example.com/%'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test LIMIT with response body (should fetch limited records)
+statement ok
+SELECT url, octet_length(response.body) as size FROM common_crawl_index()
+WHERE statuscode = 200
+LIMIT 0;

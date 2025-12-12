@@ -1,7 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "common_crawl_extension.hpp"
-#include "common_crawl_utils.hpp"
+#include "web_archive_cdx_extension.hpp"
+#include "web_archive_cdx_utils.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 
@@ -10,14 +10,14 @@
 
 namespace duckdb {
 
-// Forward declarations from common_crawl_index.cpp and internet_archive.cpp
+// Forward declarations from common_crawl_index.cpp and wayback_machine (internet_archive.cpp)
 void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op);
-void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op);
+void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op);
 
 // Combined optimizer for both table functions
 void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	OptimizeCommonCrawlLimitPushdown(plan);
-	OptimizeInternetArchiveLimitPushdown(plan);
+	OptimizeWaybackMachineLimitPushdown(plan);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -28,8 +28,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register the common_crawl_index table function
 	RegisterCommonCrawlFunction(loader);
 
-	// Register the internet_archive table function
-	RegisterInternetArchiveFunction(loader);
+	// Register the wayback_machine table function
+	RegisterWaybackMachineFunction(loader);
 
 	// Register optimizer extension for LIMIT pushdown
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
@@ -38,17 +38,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.optimizer_extensions.push_back(std::move(optimizer));
 }
 
-void CommonCrawlExtension::Load(ExtensionLoader &loader) {
+void WebArchiveCdxExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 
-std::string CommonCrawlExtension::Name() {
-	return "common_crawl";
+std::string WebArchiveCdxExtension::Name() {
+	return "web_archive_cdx";
 }
 
-std::string CommonCrawlExtension::Version() const {
-#ifdef EXT_VERSION_COMMON_CRAWL
-	return EXT_VERSION_COMMON_CRAWL;
+std::string WebArchiveCdxExtension::Version() const {
+#ifdef EXT_VERSION_WEB_ARCHIVE_CDX
+	return EXT_VERSION_WEB_ARCHIVE_CDX;
 #else
 	return "";
 #endif
@@ -58,7 +58,7 @@ std::string CommonCrawlExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(common_crawl, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(web_archive_cdx, loader) {
 	duckdb::LoadInternal(loader);
 }
 }

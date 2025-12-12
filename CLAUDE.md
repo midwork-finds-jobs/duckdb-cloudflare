@@ -1,8 +1,8 @@
-# DuckDB extension to query archived web pages
+# duckdb-web-archive-cdx - DuckDB extension to query archived web pages
 
 This extension provides two table functions:
 1. **common_crawl_index()** - Query Common Crawl web archive (2008-present, monthly snapshots)
-2. **internet_archive()** - Query Internet Archive Wayback Machine (1996-present, continuous)
+2. **wayback_machine()** - Query Internet Archive Wayback Machine (1996-present, continuous)
 
 ## Example of how duckdb can be used with this extension:
 
@@ -43,7 +43,7 @@ All common crawl indexes and their metadata can be found from: https://index.com
 ```sql
 -- Query archived snapshots with automatic LIMIT pushdown
 SELECT url, timestamp, mimetype, statuscode
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'archive.org'       -- Exact URL match
   AND statuscode = 200          -- Only successful responses
   AND mimetype = 'text/html'    -- Only HTML pages
@@ -51,7 +51,7 @@ LIMIT 10;                        -- LIMIT automatically pushed to CDX API
 
 -- Fetch archived page content
 SELECT url, timestamp, response
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'archive.org/about/'
   AND statuscode = 200
 ORDER BY timestamp DESC
@@ -138,7 +138,7 @@ x-permitted-cross-domain-policies: none
 referrer-policy: strict-origin-when-cross-origin
 content-security-policy: frame-ancestors 'self' careers.swappie.com app.example.com
 cache-control: max-age=0, public, s-maxage=5184000
-link: <https://assets-aws.teamtailor-cdn.com/assets/packs/css/careersite-68472310.css>; rel=preload; as=style; nopush
+link: <https://assets-aws.example-cdn.com/assets/packs/css/careersite-68472310.css>; rel=preload; as=style; nopush
 etag: W/"922544fef93fe74557fb8bb6175d76ed"
 x-request-id: c34c5d28935d6f9393a2f6dba9d256a7
 x-runtime: 0.334679

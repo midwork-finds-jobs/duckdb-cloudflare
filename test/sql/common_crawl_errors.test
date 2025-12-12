@@ -2,7 +2,7 @@
 # description: Test error handling and edge cases
 # group: [common_crawl]
 
-require common_crawl
+require web_archive_cdx
 
 # Test error: unknown named parameter for common_crawl_index
 statement error
@@ -12,13 +12,13 @@ Invalid named parameter
 
 # Test error: unknown named parameter for internet_archive
 statement error
-SELECT * FROM internet_archive(unknown_param := 10);
+SELECT * FROM wayback_machine(unknown_param := 10);
 ----
 Invalid named parameter
 
 # Test error: internet_archive requires URL filter
 statement error
-SELECT * FROM internet_archive() LIMIT 1;
+SELECT * FROM wayback_machine() LIMIT 1;
 ----
 requires a URL filter
 
@@ -29,7 +29,7 @@ SELECT * FROM common_crawl_index(max_results := 'not_a_number');
 
 # Test error: wrong type for max_results in internet_archive
 statement error
-SELECT * FROM internet_archive(max_results := 'not_a_number');
+SELECT * FROM wayback_machine(max_results := 'not_a_number');
 ----
 
 # Test error: negative max_results (should work but return 0 results)

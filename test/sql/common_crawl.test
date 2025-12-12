@@ -3,7 +3,7 @@
 # group: [common_crawl]
 
 # Require statement will ensure this test is run with this extension loaded
-require common_crawl
+require web_archive_cdx
 
 # Test that httpfs is loaded (required for the extension)
 query I
@@ -62,12 +62,12 @@ warc	STRUCT("version" VARCHAR, headers MAP(VARCHAR, VARCHAR))
 
 # Test that internet_archive function exists
 statement ok
-SELECT * FROM internet_archive() LIMIT 0;
+SELECT * FROM wayback_machine() LIMIT 0;
 
 # Test internet_archive column list
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT * FROM internet_archive()
+    DESCRIBE SELECT * FROM wayback_machine()
 ) ORDER BY column_name;
 ----
 cdx_url
@@ -86,7 +86,7 @@ SELECT * FROM common_crawl_index(max_results := 10) LIMIT 0;
 
 # Test named parameters for internet_archive
 statement ok
-SELECT * FROM internet_archive(max_results := 10) LIMIT 0;
+SELECT * FROM wayback_machine(max_results := 10) LIMIT 0;
 
 # Test projection pushdown
 statement ok

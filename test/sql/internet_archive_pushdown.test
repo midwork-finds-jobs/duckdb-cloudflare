@@ -5,12 +5,12 @@
 # NOTE: When only cdx_url is selected, no network request is made.
 # This allows testing URL construction without httpfs or network access.
 
-require common_crawl
+require web_archive_cdx
 
 # Test cdx_url column exists
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT cdx_url FROM internet_archive()
+    DESCRIBE SELECT cdx_url FROM wayback_machine()
 );
 ----
 cdx_url
@@ -18,7 +18,7 @@ cdx_url
 # Test cdx_url column type
 query II
 SELECT column_name, column_type FROM (
-    DESCRIBE SELECT cdx_url FROM internet_archive()
+    DESCRIBE SELECT cdx_url FROM wayback_machine()
 );
 ----
 cdx_url	VARCHAR
@@ -29,7 +29,7 @@ cdx_url	VARCHAR
 
 # Test LIMIT pushdown appears in cdx_url
 query I
-SELECT cdx_url LIKE '%&limit=5%' FROM internet_archive()
+SELECT cdx_url LIKE '%&limit=5%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 5;
 ----
@@ -37,7 +37,7 @@ true
 
 # Test different LIMIT value
 query I
-SELECT cdx_url LIKE '%&limit=10%' FROM internet_archive()
+SELECT cdx_url LIKE '%&limit=10%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 10;
 ----
@@ -45,7 +45,7 @@ true
 
 # Test LIMIT 1
 query I
-SELECT cdx_url LIKE '%&limit=1%' FROM internet_archive()
+SELECT cdx_url LIKE '%&limit=1%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 1;
 ----
@@ -57,7 +57,7 @@ true
 
 # Test statuscode = 200 pushdown
 query I
-SELECT cdx_url LIKE '%filter=statuscode:200%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=statuscode:200%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode = 200
 LIMIT 1;
@@ -66,7 +66,7 @@ true
 
 # Test statuscode = 404 pushdown
 query I
-SELECT cdx_url LIKE '%filter=statuscode:404%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=statuscode:404%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode = 404
 LIMIT 1;
@@ -75,7 +75,7 @@ true
 
 # Test statuscode != pushdown (negative filter)
 query I
-SELECT cdx_url LIKE '%filter=!statuscode:404%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!statuscode:404%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode != 404
 LIMIT 1;
@@ -88,7 +88,7 @@ true
 
 # Test mimetype = 'text/html' pushdown
 query I
-SELECT cdx_url LIKE '%filter=mimetype:text/html%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=mimetype:text/html%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND mimetype = 'text/html'
 LIMIT 1;
@@ -97,7 +97,7 @@ true
 
 # Test mimetype != pushdown (negative filter)
 query I
-SELECT cdx_url LIKE '%filter=!mimetype:application/pdf%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!mimetype:application/pdf%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND mimetype != 'application/pdf'
 LIMIT 1;
@@ -110,7 +110,7 @@ true
 
 # Test timestamp > pushdown (from date)
 query I
-SELECT cdx_url LIKE '%&from=2024%' FROM internet_archive()
+SELECT cdx_url LIKE '%&from=2024%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND timestamp > '2024-01-01'
 LIMIT 1;
@@ -119,7 +119,7 @@ true
 
 # Test timestamp < pushdown (to date)
 query I
-SELECT cdx_url LIKE '%&to=2025%' FROM internet_archive()
+SELECT cdx_url LIKE '%&to=2025%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND timestamp < '2025-01-01'
 LIMIT 1;
@@ -128,7 +128,7 @@ true
 
 # Test timestamp BETWEEN pushdown (both from and to)
 query I
-SELECT cdx_url LIKE '%&from=2024%' AND cdx_url LIKE '%&to=2025%' FROM internet_archive()
+SELECT cdx_url LIKE '%&from=2024%' AND cdx_url LIKE '%&to=2025%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND timestamp BETWEEN '2024-01-01' AND '2025-01-01'
 LIMIT 1;
@@ -141,7 +141,7 @@ true
 
 # Test exact URL match
 query I
-SELECT cdx_url LIKE '%url=example.com&%' FROM internet_archive()
+SELECT cdx_url LIKE '%url=example.com&%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 1;
 ----
@@ -149,7 +149,7 @@ true
 
 # Test wildcard URL
 query I
-SELECT cdx_url LIKE '%url=example.com/*%' FROM internet_archive()
+SELECT cdx_url LIKE '%url=example.com/*%' FROM wayback_machine()
 WHERE url = 'example.com/*'
 LIMIT 1;
 ----
@@ -161,7 +161,7 @@ true
 
 # Test url NOT LIKE pushdown - uses !original: filter
 query I
-SELECT cdx_url LIKE '%filter=!original:%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!original:%' FROM wayback_machine()
 WHERE url LIKE 'example.com/%'
   AND url NOT LIKE 'example.com/%/%'
 LIMIT 1;
@@ -170,7 +170,7 @@ true
 
 # Test url NOT LIKE with simple pattern
 query I
-SELECT cdx_url LIKE '%filter=!original:.*test.*%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!original:.*test.*%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND url NOT LIKE '%test%'
 LIMIT 1;
@@ -182,7 +182,7 @@ query I
 SELECT
     cdx_url LIKE '%url=example.com/*%'
     AND cdx_url LIKE '%filter=!original:%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url LIKE 'example.com/%'
   AND url NOT LIKE 'example.com/%/%'
 LIMIT 1;
@@ -195,7 +195,7 @@ true
 
 # Test urlkey suffix filter (LIKE '%apply') -> regex .*apply$
 query I
-SELECT cdx_url LIKE '%filter=urlkey:.*apply$%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=urlkey:.*apply$%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND urlkey LIKE '%apply'
 LIMIT 1;
@@ -204,7 +204,7 @@ true
 
 # Test urlkey NOT contains filter (NOT LIKE '%?%') -> !urlkey:.*\?.*
 query I
-SELECT cdx_url LIKE '%filter=!urlkey:%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!urlkey:%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND NOT urlkey LIKE '%?%'
 LIMIT 1;
@@ -213,7 +213,7 @@ true
 
 # Test urlkey regexp_matches pushdown
 query I
-SELECT cdx_url LIKE '%filter=urlkey:.*test.*%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=urlkey:.*test.*%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND regexp_matches(urlkey, '.*test.*')
 LIMIT 1;
@@ -222,7 +222,7 @@ true
 
 # Test urlkey NOT regexp_matches pushdown
 query I
-SELECT cdx_url LIKE '%filter=!urlkey:.*spam.*%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!urlkey:.*spam.*%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND NOT regexp_matches(urlkey, '.*spam.*')
 LIMIT 1;
@@ -239,7 +239,7 @@ SELECT
     cdx_url LIKE '%filter=statuscode:200%'
     AND cdx_url LIKE '%filter=mimetype:text/html%'
     AND cdx_url LIKE '%&limit=5%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND statuscode = 200
   AND mimetype = 'text/html'
@@ -253,7 +253,7 @@ SELECT
     cdx_url LIKE '%&from=2024%'
     AND cdx_url LIKE '%filter=statuscode:200%'
     AND cdx_url LIKE '%filter=mimetype:text/html%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND timestamp > '2024-01-01'
   AND statuscode = 200
@@ -268,7 +268,7 @@ true
 
 # Test collapse parameter appears in URL
 query I
-SELECT cdx_url LIKE '%&collapse=urlkey%' FROM internet_archive(collapse := 'urlkey')
+SELECT cdx_url LIKE '%&collapse=urlkey%' FROM wayback_machine(collapse := 'urlkey')
 WHERE url = 'example.com/*'
 LIMIT 1;
 ----
@@ -276,7 +276,7 @@ true
 
 # Test collapse with timestamp
 query I
-SELECT cdx_url LIKE '%&collapse=timestamp:8%' FROM internet_archive(collapse := 'timestamp:8')
+SELECT cdx_url LIKE '%&collapse=timestamp:8%' FROM wayback_machine(collapse := 'timestamp:8')
 WHERE url = 'example.com/*'
 LIMIT 1;
 ----
@@ -298,7 +298,7 @@ SELECT
     AND cdx_url LIKE '%filter=mimetype:text/html%'
     AND cdx_url LIKE '%filter=!urlkey:%'
     AND cdx_url LIKE '%&collapse=urlkey%'
-FROM internet_archive(collapse := 'urlkey')
+FROM wayback_machine(collapse := 'urlkey')
 WHERE url = 'example.com/*'
   AND timestamp > '2024-01-01'
   AND timestamp < '2025-01-01'
@@ -315,7 +315,7 @@ true
 
 # Test: Default LIMIT does NOT use fastLatest (positive limit)
 query I
-SELECT cdx_url LIKE '%&limit=5%' AND cdx_url NOT LIKE '%fastLatest%' FROM internet_archive()
+SELECT cdx_url LIKE '%&limit=5%' AND cdx_url NOT LIKE '%fastLatest%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 5;
 ----
@@ -323,7 +323,7 @@ true
 
 # Test: Plain LIMIT without ORDER BY should use positive limit
 query I
-SELECT cdx_url LIKE '%&limit=10%' AND cdx_url NOT LIKE '%limit=-%' FROM internet_archive()
+SELECT cdx_url LIKE '%&limit=10%' AND cdx_url NOT LIKE '%limit=-%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 10;
 ----
@@ -335,7 +335,7 @@ true
 
 # Test: SQL OFFSET is pushed down to CDX API
 query I
-SELECT cdx_url LIKE '%&offset=50%' AND cdx_url LIKE '%&limit=10%' FROM internet_archive()
+SELECT cdx_url LIKE '%&offset=50%' AND cdx_url LIKE '%&limit=10%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 10 OFFSET 50;
 ----
@@ -343,7 +343,7 @@ true
 
 # Test: LIMIT without OFFSET has no offset in URL
 query I
-SELECT cdx_url NOT LIKE '%offset%' FROM internet_archive()
+SELECT cdx_url NOT LIKE '%offset%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 5;
 ----
@@ -351,7 +351,7 @@ true
 
 # Test: OFFSET 0 should not add offset parameter
 query I
-SELECT cdx_url NOT LIKE '%offset%' FROM internet_archive()
+SELECT cdx_url NOT LIKE '%offset%' FROM wayback_machine()
 WHERE url = 'example.com'
 LIMIT 10 OFFSET 0;
 ----
@@ -363,7 +363,7 @@ true
 
 # Test statuscode IN pushdown - converts to regex alternation
 query I
-SELECT cdx_url LIKE '%filter=statuscode:(200|301|302)%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=statuscode:(200|301|302)%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode IN (200, 301, 302)
 LIMIT 1;
@@ -372,7 +372,7 @@ true
 
 # Test statuscode IN with two values
 query I
-SELECT cdx_url LIKE '%filter=statuscode:(200|404)%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=statuscode:(200|404)%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode IN (200, 404)
 LIMIT 1;
@@ -381,7 +381,7 @@ true
 
 # Test mimetype IN pushdown - converts to regex alternation
 query I
-SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain)%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain)%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND mimetype IN ('text/html', 'text/plain')
 LIMIT 1;
@@ -390,7 +390,7 @@ true
 
 # Test mimetype IN with three values
 query I
-SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain|application/json)%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=mimetype:(text/html|text/plain|application/json)%' FROM wayback_machine()
 WHERE url = 'example.com'
   AND mimetype IN ('text/html', 'text/plain', 'application/json')
 LIMIT 1;
@@ -402,7 +402,7 @@ query I
 SELECT
     cdx_url LIKE '%filter=statuscode:(200|301)%'
     AND cdx_url LIKE '%filter=mimetype:(text/html|text/plain)%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'example.com'
   AND statuscode IN (200, 301)
   AND mimetype IN ('text/html', 'text/plain')
@@ -416,7 +416,7 @@ SELECT
     cdx_url LIKE '%filter=statuscode:(200|301|302)%'
     AND cdx_url LIKE '%&from=2024%'
     AND cdx_url LIKE '%&limit=10%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND statuscode IN (200, 301, 302)
   AND timestamp > '2024-01-01'
@@ -431,7 +431,7 @@ true
 # Test urlkey NOT SIMILAR TO with * wildcard converts to .* in regex
 # Pattern: a/* should become a/.* in the CDX regex
 query I
-SELECT cdx_url LIKE '%filter=!urlkey:%' AND cdx_url LIKE '%/.*%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=!urlkey:%' AND cdx_url LIKE '%/.*%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND urlkey NOT SIMILAR TO 'a/*/*'
 LIMIT 1;
@@ -440,7 +440,7 @@ true
 
 # Test urlkey SIMILAR TO with * wildcard converts to .* in regex
 query I
-SELECT cdx_url LIKE '%filter=urlkey:^test/.*$%' FROM internet_archive()
+SELECT cdx_url LIKE '%filter=urlkey:^test/.*$%' FROM wayback_machine()
 WHERE url = 'example.com/*'
   AND urlkey SIMILAR TO 'test/*'
 LIMIT 1;
@@ -453,7 +453,7 @@ true
 
 # Test URL suffix pattern (subdomains) uses matchType=domain
 query I
-SELECT cdx_url LIKE '%url=*.example.com%' FROM internet_archive()
+SELECT cdx_url LIKE '%url=*.example.com%' FROM wayback_machine()
 WHERE url LIKE '%.example.com'
 LIMIT 1;
 ----
@@ -461,7 +461,7 @@ true
 
 # Test URL suffix with different domain
 query I
-SELECT cdx_url LIKE '%url=*.example.org%' FROM internet_archive()
+SELECT cdx_url LIKE '%url=*.example.org%' FROM wayback_machine()
 WHERE url LIKE '%.example.org'
 LIMIT 1;
 ----
@@ -473,7 +473,7 @@ SELECT
     cdx_url LIKE '%url=*.example.com%'
     AND cdx_url LIKE '%filter=statuscode:200%'
     AND cdx_url LIKE '%&limit=5%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url LIKE '%.example.com'
   AND statuscode = 200
 LIMIT 5;
@@ -485,7 +485,7 @@ query I
 SELECT
     cdx_url LIKE '%url=*.example.com%'
     AND cdx_url LIKE '%&from=2024%'
-FROM internet_archive()
+FROM wayback_machine()
 WHERE url LIKE '%.example.com'
   AND timestamp > '2024-01-01'
 LIMIT 1;

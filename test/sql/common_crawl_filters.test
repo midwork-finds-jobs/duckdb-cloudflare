@@ -1,0 +1,104 @@
+# name: test/sql/common_crawl_filters.test
+# description: Test filter pushdown for common_crawl_index
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test WHERE clause with crawl_id
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE crawl_id = 'CC-MAIN-2024-46'
+LIMIT 0;
+
+# Test WHERE clause with crawl_id IN
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE crawl_id IN ('CC-MAIN-2024-46', 'CC-MAIN-2024-42')
+LIMIT 0;
+
+# Test WHERE clause with statuscode equality
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE statuscode = 200
+LIMIT 0;
+
+# Test WHERE clause with statuscode inequality
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE statuscode != 404
+LIMIT 0;
+
+# Test WHERE clause with mimetype
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE mimetype = 'text/html'
+LIMIT 0;
+
+# Test WHERE clause with mimetype inequality
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE mimetype != 'application/pdf'
+LIMIT 0;
+
+# Test WHERE clause with URL LIKE
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE url LIKE 'https://example.com/%'
+LIMIT 0;
+
+# Test WHERE clause with URL LIKE wildcard
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE url LIKE '%.example.com/%'
+LIMIT 0;
+
+# Test multiple WHERE conditions (AND)
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE crawl_id = 'CC-MAIN-2024-46'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
+LIMIT 0;
+
+# Test multiple WHERE conditions with LIKE
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE url LIKE '%.example.com/%'
+  AND statuscode = 200
+  AND mimetype != 'application/pdf'
+LIMIT 0;
+
+# Test complex filter with IN and multiple conditions
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE crawl_id IN ('CC-MAIN-2024-46', 'CC-MAIN-2024-42')
+  AND url LIKE '%.example.com/%'
+  AND statuscode = 200
+  AND mimetype != 'application/pdf'
+LIMIT 0;
+
+# Test filter with named parameter
+statement ok
+SELECT * FROM common_crawl_index(max_results := 5)
+WHERE statuscode = 200
+LIMIT 0;
+
+# Test that filters work with projection pushdown
+statement ok
+SELECT url, statuscode FROM common_crawl_index()
+WHERE statuscode = 200
+  AND url LIKE '%.example.com/%'
+LIMIT 0;
+
+# Test accessing response only when needed (projection pushdown)
+statement ok
+SELECT url, timestamp FROM common_crawl_index()
+WHERE statuscode = 200
+LIMIT 0;
+
+# Test response.body access with filters
+statement ok
+SELECT url, response.body FROM common_crawl_index()
+WHERE statuscode = 200
+  AND mimetype = 'text/html'
+LIMIT 0;

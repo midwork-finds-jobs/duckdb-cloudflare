@@ -166,8 +166,8 @@ vector<string> GetCrawlIdsForTimestampRange(ClientContext &context, timestamp_t 
 // Common Crawl table function
 void RegisterCommonCrawlFunction(ExtensionLoader &loader);
 
-// Internet Archive table function
-void RegisterInternetArchiveFunction(ExtensionLoader &loader);
+// Wayback Machine (Internet Archive) table function
+void RegisterWaybackMachineFunction(ExtensionLoader &loader);
 
 // Optimizer for LIMIT pushdown
 void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);

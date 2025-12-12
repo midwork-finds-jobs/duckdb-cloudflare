@@ -1,0 +1,79 @@
+# name: test/sql/common_crawl_parameters.test
+# description: Test named parameters for common_crawl_index and internet_archive
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test common_crawl_index with max_results named parameter
+statement ok
+SELECT * FROM common_crawl_index(max_results := 50) LIMIT 0;
+
+# Test common_crawl_index with max_results = 1
+statement ok
+SELECT * FROM common_crawl_index(max_results := 1) LIMIT 0;
+
+# Test common_crawl_index with max_results = 100
+statement ok
+SELECT * FROM common_crawl_index(max_results := 100) LIMIT 0;
+
+# Test common_crawl_index with max_results = 1000
+statement ok
+SELECT * FROM common_crawl_index(max_results := 1000) LIMIT 0;
+
+# Test that max_results parameter works with filters
+statement ok
+SELECT * FROM common_crawl_index(max_results := 10)
+WHERE statuscode = 200
+LIMIT 0;
+
+# Test that max_results parameter works with LIMIT (LIMIT pushdown should override)
+statement ok
+SELECT * FROM common_crawl_index(max_results := 100)
+LIMIT 0;
+
+# Test internet_archive with max_results named parameter
+statement ok
+SELECT * FROM wayback_machine(max_results := 50) LIMIT 0;
+
+# Test internet_archive with max_results = 1
+statement ok
+SELECT * FROM wayback_machine(max_results := 1) LIMIT 0;
+
+# Test internet_archive with max_results = 100
+statement ok
+SELECT * FROM wayback_machine(max_results := 100) LIMIT 0;
+
+# Test that internet_archive max_results works with filters
+statement ok
+SELECT * FROM wayback_machine(max_results := 10)
+WHERE url = 'archive.org'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test that internet_archive max_results works with LIMIT
+statement ok
+SELECT * FROM wayback_machine(max_results := 100)
+WHERE url = 'archive.org'
+LIMIT 0;
+
+# Test error: invalid parameter name for common_crawl_index
+statement error
+SELECT * FROM common_crawl_index(invalid_param := 10);
+----
+Invalid named parameter
+
+# Test error: invalid parameter name for internet_archive
+statement error
+SELECT * FROM wayback_machine(invalid_param := 10);
+----
+Invalid named parameter
+
+# Test error: invalid parameter type (string instead of integer)
+statement error
+SELECT * FROM common_crawl_index(max_results := 'invalid');
+----
+
+# Test error: invalid parameter type for internet_archive
+statement error
+SELECT * FROM wayback_machine(max_results := 'invalid');
+----

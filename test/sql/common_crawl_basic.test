@@ -1,0 +1,94 @@
+# name: test/sql/common_crawl_basic.test
+# description: Basic tests for common_crawl_index function
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test that httpfs is loaded (required for the extension)
+query I
+SELECT COUNT(*) >= 0 FROM duckdb_extensions() WHERE extension_name = 'httpfs' AND loaded = true;
+----
+true
+
+# Test that common_crawl_index function exists
+statement ok
+SELECT * FROM common_crawl_index() LIMIT 0;
+
+# Test that the function returns the expected columns
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT * FROM common_crawl_index()
+) ORDER BY column_name;
+----
+crawl_id
+digest
+filename
+length
+mimetype
+offset
+response
+statuscode
+timestamp
+url
+warc
+
+# Test column types for basic fields
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM common_crawl_index()
+) WHERE column_name IN ('url', 'statuscode', 'offset', 'length', 'crawl_id')
+ORDER BY column_name;
+----
+crawl_id	VARCHAR
+length	BIGINT
+offset	BIGINT
+statuscode	INTEGER
+url	VARCHAR
+
+# Test STRUCT column types
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM common_crawl_index()
+) WHERE column_name IN ('warc', 'response')
+ORDER BY column_name;
+----
+response	STRUCT(body BLOB, headers MAP(VARCHAR, VARCHAR), http_version VARCHAR)
+warc	STRUCT("version" VARCHAR, headers MAP(VARCHAR, VARCHAR))
+
+# Test named parameter max_results
+statement ok
+SELECT * FROM common_crawl_index(max_results := 10) LIMIT 0;
+
+# Test that function works without parameters (uses default)
+statement ok
+SELECT * FROM common_crawl_index() LIMIT 0;
+
+# Test projection - only url column
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT url FROM common_crawl_index()
+);
+----
+url
+
+# Test projection - multiple columns
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT url, statuscode, mimetype FROM common_crawl_index()
+) ORDER BY column_name;
+----
+mimetype
+statuscode
+url
+
+# Test accessing STRUCT fields
+statement ok
+SELECT response.body, response.headers, response.http_version FROM common_crawl_index() LIMIT 0;
+
+# Test accessing MAP in STRUCT
+statement ok
+SELECT response.headers['Content-Type'] FROM common_crawl_index() LIMIT 0;
+
+# Test WARC struct access
+statement ok
+SELECT warc.version, warc.headers FROM common_crawl_index() LIMIT 0;

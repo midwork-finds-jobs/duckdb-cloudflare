@@ -1,4 +1,4 @@
-#include "common_crawl_utils.hpp"
+#include "web_archive_cdx_utils.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -345,6 +345,12 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
                                                                     TableFunctionInitInput &input) {
 	DUCKDB_LOG_DEBUG(context, "CommonCrawlInitGlobal called +%.0fms", ElapsedMs());
 	auto &bind_data = const_cast<CommonCrawlBindData&>(input.bind_data->Cast<CommonCrawlBindData>());
+
+	// Validate URL filter - don't allow queries without a specific URL
+	if (bind_data.url_filter == "*" || bind_data.url_filter.empty()) {
+		throw InvalidInputException("common_crawl_index() requires a URL filter. Use WHERE url LIKE '%.example.com/%' or WHERE url LIKE 'https://example.com/%'");
+	}
+
 	auto state = make_uniq<CommonCrawlGlobalState>();
 
 	// Determine crawl_ids based on filters:

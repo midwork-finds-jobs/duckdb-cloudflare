@@ -1,4 +1,4 @@
-#include "common_crawl_utils.hpp"
+#include "web_archive_cdx_utils.hpp"
 #include <set>
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -18,8 +18,8 @@ namespace duckdb {
 // BIND DATA AND STATE
 // ========================================
 
-// Structure to hold bind data for internet_archive table function
-struct InternetArchiveBindData : public TableFunctionData {
+// Structure to hold bind data for wayback_machine table function
+struct WaybackMachineBindData : public TableFunctionData {
 	vector<string> column_names;
 	vector<LogicalType> column_types;
 	vector<string> fields_needed;
@@ -37,16 +37,16 @@ struct InternetArchiveBindData : public TableFunctionData {
 	bool order_desc;  // ORDER BY timestamp DESC detected
 	idx_t offset;     // offset parameter for pagination
 
-	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0) {}
+	WaybackMachineBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0) {}
 };
 
-// Structure to hold global state for internet_archive table function
-struct InternetArchiveGlobalState : public GlobalTableFunctionState {
+// Structure to hold global state for wayback_machine table function
+struct WaybackMachineGlobalState : public GlobalTableFunctionState {
 	vector<ArchiveOrgRecord> records;
 	idx_t current_position;
 	vector<column_t> column_ids;
 
-	InternetArchiveGlobalState() : current_position(0) {}
+	WaybackMachineGlobalState() : current_position(0) {}
 
 	idx_t MaxThreads() const override {
 		return 1; // Single-threaded
@@ -284,30 +284,30 @@ static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &
 // TABLE FUNCTION IMPLEMENTATION
 // ========================================
 
-// Bind function for internet_archive table function
-static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, TableFunctionBindInput &input,
+// Bind function for wayback_machine table function
+static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	g_start_time = std::chrono::steady_clock::now();
-	DUCKDB_LOG_DEBUG(context, "InternetArchiveBind called +%.0fms", ElapsedMs());
+	DUCKDB_LOG_DEBUG(context, "WaybackMachineBind called +%.0fms", ElapsedMs());
 
-	auto bind_data = make_uniq<InternetArchiveBindData>();
+	auto bind_data = make_uniq<WaybackMachineBindData>();
 
 	// Handle named parameters
 	for (auto &kv : input.named_parameters) {
 		if (kv.first == "max_results") {
 			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
-				throw BinderException("internet_archive max_results parameter must be an integer");
+				throw BinderException("wayback_machine max_results parameter must be an integer");
 			}
 			bind_data->max_results = kv.second.GetValue<int64_t>();
 			DUCKDB_LOG_DEBUG(context, "CDX API max_results set to: %lu", (unsigned long)bind_data->max_results);
 		} else if (kv.first == "collapse") {
 			if (kv.second.type().id() != LogicalTypeId::VARCHAR) {
-				throw BinderException("internet_archive collapse parameter must be a string");
+				throw BinderException("wayback_machine collapse parameter must be a string");
 			}
 			bind_data->collapse = kv.second.GetValue<string>();
 			DUCKDB_LOG_DEBUG(context, "CDX API collapse set to: %s", bind_data->collapse.c_str());
 		} else {
-			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
+			throw BinderException("Unknown parameter '%s' for wayback_machine", kv.first.c_str());
 		}
 	}
 
@@ -340,9 +340,11 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 	return_types.push_back(LogicalType::BIGINT);
 	bind_data->fields_needed.push_back("length");
 
-	// Add response column (BLOB for raw HTTP body)
+	// Add response column as STRUCT with body field (consistent with common_crawl_index)
 	names.push_back("response");
-	return_types.push_back(LogicalType::BLOB);
+	child_list_t<LogicalType> response_children;
+	response_children.push_back(make_pair("body", LogicalType::BLOB));
+	return_types.push_back(LogicalType::STRUCT(response_children));
 
 	// Add cdx_url column (the CDX API URL used for the query)
 	names.push_back("cdx_url");
@@ -356,18 +358,18 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 	return std::move(bind_data);
 }
 
-// Init global state function for internet_archive
-static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientContext &context,
+// Init global state function for wayback_machine
+static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
-	DUCKDB_LOG_DEBUG(context, "InternetArchiveInitGlobal called +%.0fms", ElapsedMs());
-	auto &bind_data = const_cast<InternetArchiveBindData&>(input.bind_data->Cast<InternetArchiveBindData>());
+	DUCKDB_LOG_DEBUG(context, "WaybackMachineInitGlobal called +%.0fms", ElapsedMs());
+	auto &bind_data = const_cast<WaybackMachineBindData&>(input.bind_data->Cast<WaybackMachineBindData>());
 
 	// Validate URL filter - don't allow queries without a specific URL
 	if (bind_data.url_filter == "*" || bind_data.url_filter.empty()) {
-		throw InvalidInputException("internet_archive() requires a URL filter. Use WHERE url = 'example.com', WHERE url LIKE 'example.com/%', or WHERE url LIKE '%.example.com' for subdomains");
+		throw InvalidInputException("wayback_machine() requires a URL filter. Use WHERE url = 'example.com', WHERE url LIKE 'example.com/%', or WHERE url LIKE '%.example.com' for subdomains");
 	}
 
-	auto state = make_uniq<InternetArchiveGlobalState>();
+	auto state = make_uniq<WaybackMachineGlobalState>();
 
 	// Store projected columns
 	state->column_ids = input.column_ids;
@@ -431,10 +433,10 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 	return std::move(state);
 }
 
-// Scan function for internet_archive table function
-static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &bind_data = data.bind_data->Cast<InternetArchiveBindData>();
-	auto &gstate = data.global_state->Cast<InternetArchiveGlobalState>();
+// Scan function for wayback_machine table function
+static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<WaybackMachineBindData>();
+	auto &gstate = data.global_state->Cast<WaybackMachineGlobalState>();
 
 	// Pre-fetch responses in parallel for this chunk if needed
 	std::vector<string> response_bodies;
@@ -495,8 +497,13 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 				} else if (col_name == "response") {
 					if (bind_data.fetch_response && !response_bodies.empty()) {
 						string &body = response_bodies[output_offset];
-						auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
-						data_ptr[output_offset] = StringVector::AddStringOrBlob(output.data[proj_idx], body);
+						// Response STRUCT with body field
+						auto &struct_vector = output.data[proj_idx];
+						auto &struct_children = StructVector::GetEntries(struct_vector);
+						// Child 0: body (BLOB)
+						auto &body_vector = struct_children[0];
+						auto body_data = FlatVector::GetData<string_t>(*body_vector);
+						body_data[output_offset] = StringVector::AddStringOrBlob(*body_vector, body);
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
@@ -556,7 +563,7 @@ static string EscapeRegex(const string &val) {
 
 // Helper to check if column supports CDX regex and add filter
 // Returns true if filter was added
-static bool TryAddCdxRegexFilter(ClientContext &context, InternetArchiveBindData &bind_data, const string &col_name,
+static bool TryAddCdxRegexFilter(ClientContext &context, WaybackMachineBindData &bind_data, const string &col_name,
                                    const string &filter_pattern, const string &debug_label,
                                    bool negate = false) {
 	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
@@ -570,7 +577,7 @@ static bool TryAddCdxRegexFilter(ClientContext &context, InternetArchiveBindData
 
 // Helper to handle IN expression for CDX columns (statuscode, mimetype)
 // Converts IN (val1, val2, ...) to regex alternation (val1|val2|...)
-static bool TryHandleInExpression(ClientContext &context, InternetArchiveBindData &bind_data, BoundOperatorExpression &op,
+static bool TryHandleInExpression(ClientContext &context, WaybackMachineBindData &bind_data, BoundOperatorExpression &op,
                                     const string &col_name, bool is_integer) {
 	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
 		return false;
@@ -616,11 +623,11 @@ static bool TryHandleInExpression(ClientContext &context, InternetArchiveBindDat
 	return true;
 }
 
-// Filter pushdown for internet_archive
-static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+// Filter pushdown for wayback_machine
+static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                    vector<unique_ptr<Expression>> &filters) {
-	DUCKDB_LOG_DEBUG(context, "InternetArchivePushdownComplexFilter called with %lu filters +%.0fms", (unsigned long)filters.size(), ElapsedMs());
-	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
+	DUCKDB_LOG_DEBUG(context, "WaybackMachinePushdownComplexFilter called with %lu filters +%.0fms", (unsigned long)filters.size(), ElapsedMs());
+	auto &bind_data = bind_data_p->Cast<WaybackMachineBindData>();
 
 	// Build column map
 	std::unordered_map<string, idx_t> column_map;
@@ -1099,9 +1106,9 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 	}
 }
 
-// Cardinality function for internet_archive
-static unique_ptr<NodeStatistics> InternetArchiveCardinality(ClientContext &context, const FunctionData *bind_data_p) {
-	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
+// Cardinality function for wayback_machine
+static unique_ptr<NodeStatistics> WaybackMachineCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<WaybackMachineBindData>();
 	return make_uniq<NodeStatistics>(bind_data.max_results);
 }
 
@@ -1110,7 +1117,7 @@ static unique_ptr<NodeStatistics> InternetArchiveCardinality(ClientContext &cont
 // ========================================
 
 // Helper function to check if TOP_N orders by timestamp DESC
-static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindData &bind_data) {
+static bool IsTimestampDescTopN(LogicalTopN &top_n, const WaybackMachineBindData &bind_data) {
 	if (top_n.orders.empty()) {
 		return false;
 	}
@@ -1128,7 +1135,7 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindDat
 		auto &col_ref = first_order.expression->Cast<BoundColumnRefExpression>();
 		string col_name = col_ref.GetName();
 
-		// Check if column name contains "timestamp" (handles qualified names like 'internet_archive."timestamp"')
+		// Check if column name contains "timestamp" (handles qualified names like 'wayback_machine."timestamp"')
 		if (col_name.find("timestamp") != string::npos || col_ref.alias.find("timestamp") != string::npos) {
 			return true;
 		}
@@ -1143,8 +1150,8 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindDat
 	return false;
 }
 
-// Optimizer function to push down LIMIT to internet_archive function
-void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
+// Optimizer function to push down LIMIT to wayback_machine function
+void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 	// Handle TOP_N (ORDER BY + LIMIT combined)
 	if (op->type == LogicalOperatorType::LOGICAL_TOP_N) {
 		auto &top_n = op->Cast<LogicalTopN>();
@@ -1157,17 +1164,17 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
-			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "internet_archive") {
-			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+		if (get.function.name != "wayback_machine") {
+			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
 
-		auto &bind_data = get.bind_data->Cast<InternetArchiveBindData>();
+		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 
 		// Check if ORDER BY timestamp DESC
 		if (IsTimestampDescTopN(top_n, bind_data)) {
@@ -1203,13 +1210,13 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
-			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "internet_archive") {
-			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+		if (get.function.name != "wayback_machine") {
+			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
 
@@ -1220,7 +1227,7 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			break;
 		default:
 			// not a constant or unset limit
-			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
 
@@ -1238,7 +1245,7 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		// Extract limit value and store in bind_data
-		auto &bind_data = get.bind_data->Cast<InternetArchiveBindData>();
+		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 		if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 			bind_data.max_results = limit.limit_val.GetConstantValue();
 
@@ -1255,7 +1262,7 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 
 	// Recurse into children
 	for (auto &child : op->children) {
-		OptimizeInternetArchiveLimitPushdown(child);
+		OptimizeWaybackMachineLimitPushdown(child);
 	}
 }
 
@@ -1263,30 +1270,30 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 // REGISTRATION
 // ========================================
 
-void RegisterInternetArchiveFunction(ExtensionLoader &loader) {
-	// Register the internet_archive table function
-	// Usage: SELECT * FROM internet_archive() WHERE url = 'archive.org' LIMIT 10
-	// Usage with max_results: SELECT * FROM internet_archive(max_results := 500) WHERE url = 'archive.org'
+void RegisterWaybackMachineFunction(ExtensionLoader &loader) {
+	// Register the wayback_machine table function
+	// Usage: SELECT * FROM wayback_machine() WHERE url = 'archive.org' LIMIT 10
+	// Usage with max_results: SELECT * FROM wayback_machine(max_results := 500) WHERE url = 'archive.org'
 	// - URL filtering via WHERE clause
 	// - Supports matchType detection (exact, prefix, host, domain)
 	// - Much simpler than common_crawl - no WARC parsing needed
 	// - Projection pushdown: only fetches response when needed
 	// - Optional max_results parameter controls CDX API result size (default: 100)
-	TableFunctionSet internet_archive_set("internet_archive");
+	TableFunctionSet wayback_machine_set("wayback_machine");
 
 	auto ia_func = TableFunction({},
-	                              InternetArchiveScan, InternetArchiveBind, InternetArchiveInitGlobal);
-	ia_func.cardinality = InternetArchiveCardinality;
-	ia_func.pushdown_complex_filter = InternetArchivePushdownComplexFilter;
+	                              WaybackMachineScan, WaybackMachineBind, WaybackMachineInitGlobal);
+	ia_func.cardinality = WaybackMachineCardinality;
+	ia_func.pushdown_complex_filter = WaybackMachinePushdownComplexFilter;
 	ia_func.projection_pushdown = true;
 
 	// Add named parameters
 	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
 	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
 
-	internet_archive_set.AddFunction(ia_func);
+	wayback_machine_set.AddFunction(ia_func);
 
-	loader.RegisterFunction(internet_archive_set);
+	loader.RegisterFunction(wayback_machine_set);
 }
 
 } // namespace duckdb

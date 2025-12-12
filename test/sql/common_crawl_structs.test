@@ -1,0 +1,117 @@
+# name: test/sql/common_crawl_structs.test
+# description: Test STRUCT and MAP types in common_crawl_index
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test response STRUCT has correct structure
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT response FROM common_crawl_index()
+);
+----
+response
+
+# Test accessing response.body
+statement ok
+SELECT response.body FROM common_crawl_index() LIMIT 0;
+
+# Test accessing response.headers
+statement ok
+SELECT response.headers FROM common_crawl_index() LIMIT 0;
+
+# Test accessing response.http_version
+statement ok
+SELECT response.http_version FROM common_crawl_index() LIMIT 0;
+
+# Test accessing all response fields
+statement ok
+SELECT response.body, response.headers, response.http_version
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test MAP access in response.headers
+statement ok
+SELECT response.headers['Content-Type'] as content_type
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test MAP access with multiple keys
+statement ok
+SELECT
+    response.headers['Content-Type'] as content_type,
+    response.headers['Content-Length'] as content_length
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test accessing response.body length
+statement ok
+SELECT url, octet_length(response.body) as body_size
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test WARC STRUCT has correct structure
+statement ok
+SELECT warc FROM common_crawl_index() LIMIT 0;
+
+# Test accessing warc.version
+statement ok
+SELECT warc.version FROM common_crawl_index() LIMIT 0;
+
+# Test accessing warc.headers
+statement ok
+SELECT warc.headers FROM common_crawl_index() LIMIT 0;
+
+# Test MAP access in warc.headers
+statement ok
+SELECT warc.headers['WARC-Record-ID'] as record_id
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test accessing both WARC and response
+statement ok
+SELECT warc.version, response.http_version
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test complex nested access
+statement ok
+SELECT
+    url,
+    warc.version as warc_version,
+    warc.headers['WARC-Record-ID'] as warc_id,
+    response.http_version,
+    response.headers['Content-Type'] as content_type,
+    octet_length(response.body) as body_size
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test filtering on MAP values
+statement ok
+SELECT url FROM common_crawl_index()
+WHERE response.headers['Content-Type'] LIKE '%text/html%'
+LIMIT 0;
+
+# Test filtering with IS NOT NULL on STRUCT fields
+statement ok
+SELECT url FROM common_crawl_index()
+WHERE response.body IS NOT NULL
+LIMIT 0;
+
+# Test cardinality of MAP (number of headers)
+statement ok
+SELECT url, cardinality(response.headers) as header_count
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test map_keys function on headers
+statement ok
+SELECT url, map_keys(response.headers) as header_names
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test map_values function on headers
+statement ok
+SELECT url, map_values(response.headers) as header_values
+FROM common_crawl_index()
+LIMIT 0;

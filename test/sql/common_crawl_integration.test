@@ -1,0 +1,158 @@
+# name: test/sql/common_crawl_integration.test
+# description: Integration tests combining multiple features
+# group: [common_crawl]
+
+require web_archive_cdx
+
+# Test projection + filter + limit
+statement ok
+SELECT url, statuscode FROM common_crawl_index()
+WHERE crawl_id = 'CC-MAIN-2024-46'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test multiple crawl_ids with IN clause + filters + limit
+statement ok
+SELECT url, timestamp FROM common_crawl_index()
+WHERE crawl_id IN ('CC-MAIN-2024-46', 'CC-MAIN-2024-42')
+  AND url LIKE '%.example.com/%'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
+LIMIT 0;
+
+# Test projection with STRUCT access + filters
+statement ok
+SELECT
+    url,
+    response.http_version,
+    response.headers['Content-Type'] as content_type,
+    octet_length(response.body) as size
+FROM common_crawl_index()
+WHERE statuscode = 200
+  AND mimetype = 'text/html'
+LIMIT 0;
+
+# Test COUNT with filters
+statement ok
+SELECT COUNT(*) as total
+FROM common_crawl_index()
+WHERE statuscode = 200
+  AND url LIKE '%.example.com/%'
+LIMIT 0;
+
+# Test GROUP BY with filters
+statement ok
+SELECT statuscode, COUNT(*) as count
+FROM common_crawl_index()
+WHERE url LIKE '%.example.com/%'
+GROUP BY statuscode
+LIMIT 0;
+
+# Test ORDER BY with projection and filters
+statement ok
+SELECT url, timestamp, statuscode
+FROM common_crawl_index()
+WHERE statuscode = 200
+ORDER BY timestamp DESC
+LIMIT 0;
+
+# Test aggregation with STRUCT fields
+statement ok
+SELECT
+    AVG(octet_length(response.body)) as avg_size,
+    MIN(octet_length(response.body)) as min_size,
+    MAX(octet_length(response.body)) as max_size
+FROM common_crawl_index()
+WHERE statuscode = 200
+  AND mimetype = 'text/html'
+LIMIT 0;
+
+# Test DISTINCT with filters
+statement ok
+SELECT DISTINCT mimetype
+FROM common_crawl_index()
+WHERE url LIKE '%.example.com/%'
+LIMIT 0;
+
+# Test subquery
+statement ok
+SELECT url, statuscode FROM (
+    SELECT * FROM common_crawl_index()
+    WHERE statuscode = 200
+    LIMIT 0
+)
+WHERE url LIKE '%.com/%';
+
+# Test JOIN (self-join for demonstration)
+statement ok
+SELECT a.url, b.url
+FROM (SELECT url, statuscode FROM common_crawl_index() WHERE statuscode = 200 LIMIT 0) a
+CROSS JOIN (SELECT url, statuscode FROM common_crawl_index() WHERE statuscode = 404 LIMIT 0) b
+LIMIT 0;
+
+# Test UNION
+statement ok
+(SELECT url FROM common_crawl_index() WHERE statuscode = 200 LIMIT 0) UNION ALL (SELECT url FROM common_crawl_index() WHERE statuscode = 404 LIMIT 0);
+
+# Test CTE (Common Table Expression)
+statement ok
+WITH filtered_records AS (
+    SELECT url, statuscode, mimetype
+    FROM common_crawl_index()
+    WHERE statuscode = 200
+    LIMIT 0
+)
+SELECT mimetype, COUNT(*) as count
+FROM filtered_records
+GROUP BY mimetype;
+
+# Test complex filter with CASE statement
+statement ok
+SELECT
+    url,
+    CASE
+        WHEN statuscode = 200 THEN 'Success'
+        WHEN statuscode >= 400 THEN 'Error'
+        ELSE 'Other'
+    END as status_category
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test filtering on computed columns
+statement ok
+SELECT url, octet_length(response.body) as size
+FROM common_crawl_index()
+WHERE octet_length(response.body) > 1000
+  AND statuscode = 200
+LIMIT 0;
+
+# Test named parameter + all pushdown types
+statement ok
+SELECT url, statuscode, mimetype
+FROM common_crawl_index(max_results := 25)
+WHERE crawl_id = 'CC-MAIN-2024-46'
+  AND url LIKE '%.example.com/%'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test internet_archive with all pushdown types
+statement ok
+SELECT url, timestamp, statuscode
+FROM wayback_machine(max_results := 25)
+WHERE url = 'archive.org'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
+ORDER BY timestamp DESC
+LIMIT 0;
+
+# Test wayback_machine with response body
+statement ok
+SELECT url, octet_length(response.body) as size
+FROM wayback_machine()
+WHERE url = 'archive.org'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test combining both table functions (UNION)
+statement ok
+(SELECT url, statuscode FROM common_crawl_index() WHERE statuscode = 200 LIMIT 0) UNION ALL (SELECT url, statuscode FROM wayback_machine() WHERE url = 'archive.org' LIMIT 0);
