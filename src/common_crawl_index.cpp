@@ -7,6 +7,7 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/logging/logger.hpp"
 
 namespace duckdb {
 
@@ -25,9 +26,13 @@ struct CommonCrawlBindData : public TableFunctionData {
 	string url_filter;
 	vector<string> cdx_filters; // CDX API filter parameters (e.g., "=status:200", "=mime:text/html")
 	idx_t max_results; // Maximum number of results to fetch from CDX API
+	timestamp_t timestamp_from; // Timestamp range filter (from collinfo.json lookup)
+	timestamp_t timestamp_to;   // Timestamp range filter (from collinfo.json lookup)
+	bool has_timestamp_filter;  // Whether timestamp filters were applied
 
 	// Default CDX limit set to 100 to prevent fetching too many results
-	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(100) {}
+	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(100),
+	                                     timestamp_from(timestamp_t(0)), timestamp_to(timestamp_t(0)), has_timestamp_filter(false) {}
 };
 
 // Structure to hold global state for the table function
@@ -50,7 +55,7 @@ struct CommonCrawlGlobalState : public GlobalTableFunctionState {
 // Helper function to query CDX API using FileSystem
 static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index_name, const string &url_pattern,
                                       const vector<string> &fields_needed, const vector<string> &cdx_filters, idx_t max_results) {
-	fprintf(stderr, "[DEBUG] QueryCDXAPI started\n");
+	DUCKDB_LOG_DEBUG(context, "QueryCDXAPI started +%.0fms", ElapsedMs());
 	vector<CDXRecord> records;
 
 	// Helper lambda to map DuckDB column names to CDX API field names
@@ -87,15 +92,15 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 	}
 
 	// Debug: print the final CDX URL
-	fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), cdx_url.c_str());
+	DUCKDB_LOG_DEBUG(context, "CDX URL: %s +%.0fms", cdx_url.c_str(), ElapsedMs());
 
 	try {
-		fprintf(stderr, "[DEBUG] Opening CDX URL\n");
+		DUCKDB_LOG_DEBUG(context, "Opening CDX URL +%.0fms", ElapsedMs());
 		// Use FileSystem to fetch the CDX data
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(cdx_url, FileFlags::FILE_FLAGS_READ);
 
-		fprintf(stderr, "[DEBUG] Reading CDX response\n");
+		DUCKDB_LOG_DEBUG(context, "Reading CDX response +%.0fms", ElapsedMs());
 		// Read the entire response
 		string response_data;
 		const idx_t buffer_size = 8192;
@@ -109,13 +114,13 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 			response_data.append(buffer.get(), bytes_read);
 		}
 
-		fprintf(stderr, "[DEBUG] Got %lu bytes, sanitizing UTF-8\n", (unsigned long)response_data.size());
+		DUCKDB_LOG_DEBUG(context, "Got %lu bytes, sanitizing UTF-8 +%.0fms", (unsigned long)response_data.size(), ElapsedMs());
 		// Sanitize the entire response to ensure valid UTF-8
 		response_data = SanitizeUTF8(response_data);
-		fprintf(stderr, "[DEBUG] UTF-8 sanitization complete\n");
+		DUCKDB_LOG_DEBUG(context, "UTF-8 sanitization complete +%.0fms", ElapsedMs());
 
 		// Parse newline-delimited JSON
-		fprintf(stderr, "[DEBUG] Parsing JSON lines\n");
+		DUCKDB_LOG_DEBUG(context, "Parsing JSON lines +%.0fms", ElapsedMs());
 		std::istringstream stream(response_data);
 		string line;
 		int line_count = 0;
@@ -153,7 +158,7 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 
 			records.push_back(record);
 		}
-		fprintf(stderr, "[DEBUG] Parsed %d JSON lines, got %lu records\n", line_count, (unsigned long)records.size());
+		DUCKDB_LOG_DEBUG(context, "Parsed %d JSON lines, got %lu records +%.0fms", line_count, (unsigned long)records.size(), ElapsedMs());
 
 	} catch (std::exception &ex) {
 		throw IOException("Error querying CDX API: " + string(ex.what()));
@@ -232,8 +237,7 @@ static WARCResponse FetchWARCResponse(ClientContext &context, const CDXRecord &r
 // Bind function for the table function
 static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
-	fprintf(stderr, "[DEBUG] CommonCrawlBind called\n");
-	fflush(stderr);
+	DUCKDB_LOG_DEBUG(context, "CommonCrawlBind called +%.0fms", ElapsedMs());
 
 	// Optional max_results named parameter to control CDX API result size
 	// If provided, overrides the default max_results (100)
@@ -246,7 +250,7 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 				throw BinderException("common_crawl_index max_results parameter must be an integer");
 			}
 			bind_data->max_results = kv.second.GetValue<int64_t>();
-			fprintf(stderr, "[DEBUG] CDX API max_results set to: %lu\n", (unsigned long)bind_data->max_results);
+			DUCKDB_LOG_DEBUG(context, "CDX API max_results set to: %lu", (unsigned long)bind_data->max_results);
 		} else {
 			throw BinderException("Unknown parameter '%s' for common_crawl_index", kv.first.c_str());
 		}
@@ -320,24 +324,45 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 // Init global state function
 static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext &context,
                                                                     TableFunctionInitInput &input) {
-	fprintf(stderr, "[DEBUG] CommonCrawlInitGlobal called\n");
+	DUCKDB_LOG_DEBUG(context, "CommonCrawlInitGlobal called +%.0fms", ElapsedMs());
 	auto &bind_data = const_cast<CommonCrawlBindData&>(input.bind_data->Cast<CommonCrawlBindData>());
 	auto state = make_uniq<CommonCrawlGlobalState>();
 
-	// If no crawl_id was specified in WHERE clause, fetch the latest one
-	// Don't fetch if crawl_ids vector is populated (from IN clause)
+	// Determine crawl_ids based on filters:
+	// 1. If explicit crawl_id(s) specified via WHERE clause, use those
+	// 2. If timestamp range filter specified, look up matching crawl_ids from collinfo.json
+	// 3. Otherwise, use the latest crawl_id
 	if (bind_data.index_name.empty() && bind_data.crawl_ids.empty()) {
-		bind_data.index_name = GetLatestCrawlId(context);
-		fprintf(stderr, "[DEBUG] Using latest crawl_id: %s\n", bind_data.index_name.c_str());
+		if (bind_data.has_timestamp_filter) {
+			// Look up crawl_ids that overlap with the timestamp range
+			auto matching_ids = GetCrawlIdsForTimestampRange(context, bind_data.timestamp_from, bind_data.timestamp_to);
+			if (!matching_ids.empty()) {
+				bind_data.crawl_ids = matching_ids;
+				string ids_str;
+				for (const auto &id : matching_ids) {
+					ids_str += id + " ";
+				}
+				DUCKDB_LOG_DEBUG(context, "Timestamp filter matched %lu crawl_ids: %s +%.0fms",
+				                 (unsigned long)matching_ids.size(), ids_str.c_str(), ElapsedMs());
+			} else {
+				// No matching crawls found, fall back to latest
+				bind_data.index_name = GetLatestCrawlId(context);
+				DUCKDB_LOG_DEBUG(context, "No crawl_ids match timestamp range, using latest: %s +%.0fms",
+				                 bind_data.index_name.c_str(), ElapsedMs());
+			}
+		} else {
+			bind_data.index_name = GetLatestCrawlId(context);
+			DUCKDB_LOG_DEBUG(context, "Using latest crawl_id: %s +%.0fms", bind_data.index_name.c_str(), ElapsedMs());
+		}
 	}
 
 	// Store which columns are selected for projection pushdown
 	state->column_ids = input.column_ids;
-	fprintf(stderr, "[DEBUG] Projected columns: ");
+	string proj_cols_str;
 	for (auto &col_id : input.column_ids) {
-		fprintf(stderr, "%lu ", (unsigned long)col_id);
+		proj_cols_str += to_string(col_id) + " ";
 	}
-	fprintf(stderr, "\n");
+	DUCKDB_LOG_DEBUG(context, "Projected columns: %s +%.0fms", proj_cols_str.c_str(), ElapsedMs());
 
 	// CDX API fields that can be requested from index.commoncrawl.org
 	// All other columns are computed by our extension
@@ -354,7 +379,7 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	for (auto &col_id : input.column_ids) {
 		if (col_id < bind_data.column_names.size()) {
 			string col_name = bind_data.column_names[col_id];
-			fprintf(stderr, "[DEBUG] Column %lu = %s\n", (unsigned long)col_id, col_name.c_str());
+			DUCKDB_LOG_DEBUG(context, "Column %lu = %s", (unsigned long)col_id, col_name.c_str());
 
 			// Check if we need to fetch WARC data for this column
 			if (col_name == "warc" || col_name == "response") {
@@ -389,7 +414,7 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 
 	// Override fetch_response based on projection
 	bind_data.fetch_response = need_response;
-	fprintf(stderr, "[DEBUG] fetch_response = %d, need_warc = %d\n", bind_data.fetch_response, need_warc);
+	DUCKDB_LOG_DEBUG(context, "fetch_response = %d, need_warc = %d +%.0fms", bind_data.fetch_response, need_warc, ElapsedMs());
 
 	// Ensure we always request at least 'url' field from CDX API
 	// (e.g., when only crawl_id is selected, we still need a CDX field to get records)
@@ -399,12 +424,12 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 
 	// Use the URL filter from bind data (could be set via filter pushdown)
 	string url_pattern = bind_data.url_filter;
-	fprintf(stderr, "[DEBUG] About to call QueryCDXAPI with %lu fields\n", (unsigned long)needed_fields.size());
+	DUCKDB_LOG_DEBUG(context, "About to call QueryCDXAPI with %lu fields +%.0fms", (unsigned long)needed_fields.size(), ElapsedMs());
 
 	// Query CDX API - handle multiple crawl_ids if IN clause was used
 	if (!bind_data.crawl_ids.empty()) {
 		// IN clause detected: query each crawl_id in parallel and combine results
-		fprintf(stderr, "[DEBUG] Launching %lu parallel CDX API requests\n", (unsigned long)bind_data.crawl_ids.size());
+		DUCKDB_LOG_DEBUG(context, "Launching %lu parallel CDX API requests +%.0fms", (unsigned long)bind_data.crawl_ids.size(), ElapsedMs());
 
 		std::vector<std::future<vector<CDXRecord>>> futures;
 		futures.reserve(bind_data.crawl_ids.size());
@@ -422,11 +447,11 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 			state->records.insert(state->records.end(), records.begin(), records.end());
 		}
 
-		fprintf(stderr, "[DEBUG] All parallel requests completed, total records: %lu\n", (unsigned long)state->records.size());
+		DUCKDB_LOG_DEBUG(context, "All parallel requests completed, total records: %lu +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	} else {
 		// Single crawl_id: use index_name
 		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
-		fprintf(stderr, "[DEBUG] QueryCDXAPI returned %lu records\n", (unsigned long)state->records.size());
+		DUCKDB_LOG_DEBUG(context, "QueryCDXAPI returned %lu records +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	}
 
 	return std::move(state);
@@ -434,17 +459,17 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 
 // Scan function for the table function
 static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	fprintf(stderr, "[DEBUG] CommonCrawlScan called\n");
+	DUCKDB_LOG_DEBUG(context, "CommonCrawlScan called +%.0fms", ElapsedMs());
 	auto &bind_data = data.bind_data->Cast<CommonCrawlBindData>();
 	auto &gstate = data.global_state->Cast<CommonCrawlGlobalState>();
-	fprintf(stderr, "[DEBUG] Have %lu records to process\n", (unsigned long)gstate.records.size());
+	DUCKDB_LOG_DEBUG(context, "Have %lu records to process +%.0fms", (unsigned long)gstate.records.size(), ElapsedMs());
 
 	// Pre-fetch WARCs in parallel for this chunk if needed
 	std::vector<WARCResponse> warc_responses;
 	idx_t chunk_size = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.records.size() - gstate.current_position);
 
 	if (bind_data.fetch_response && chunk_size > 0) {
-		fprintf(stderr, "[DEBUG] Pre-fetching %lu WARCs in parallel\n", (unsigned long)chunk_size);
+		DUCKDB_LOG_DEBUG(context, "Pre-fetching %lu WARCs in parallel +%.0fms", (unsigned long)chunk_size, ElapsedMs());
 		std::vector<std::future<WARCResponse>> warc_futures;
 		warc_futures.reserve(chunk_size);
 
@@ -461,7 +486,7 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 		for (auto &future : warc_futures) {
 			warc_responses.push_back(future.get());
 		}
-		fprintf(stderr, "[DEBUG] All %lu WARCs fetched\n", (unsigned long)chunk_size);
+		DUCKDB_LOG_DEBUG(context, "All %lu WARCs fetched +%.0fms", (unsigned long)chunk_size, ElapsedMs());
 	}
 
 	idx_t output_offset = 0;
@@ -585,7 +610,7 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 					}
 				}
 			} catch (const std::exception &ex) {
-				fprintf(stderr, "[ERROR] Failed to process column %s for row %lu: %s\n",
+				DUCKDB_LOG_ERROR(context, "Failed to process column %s for row %lu: %s",
 				        col_name.c_str(), (unsigned long)gstate.current_position, ex.what());
 				row_success = false;
 				break;
@@ -608,7 +633,7 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 // Filter pushdown function to handle WHERE clauses
 static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                vector<unique_ptr<Expression>> &filters) {
-	fprintf(stderr, "[DEBUG] CommonCrawlPushdownComplexFilter called with %lu filters\n", (unsigned long)filters.size());
+	DUCKDB_LOG_DEBUG(context, "CommonCrawlPushdownComplexFilter called with %lu filters +%.0fms", (unsigned long)filters.size(), ElapsedMs());
 	auto &bind_data = bind_data_p->Cast<CommonCrawlBindData>();
 
 
@@ -623,8 +648,7 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 	for (idx_t i = 0; i < filters.size(); i++) {
 		auto &filter = filters[i];
-		fprintf(stderr, "[DEBUG] Filter %lu: class=%d\n",
-		        (unsigned long)i, (int)filter->GetExpressionClass());
+		DUCKDB_LOG_DEBUG(context, "Filter %lu: class=%d", (unsigned long)i, (int)filter->GetExpressionClass());
 
 		// Handle BOUND_OPERATOR for IN clauses (e.g., crawl_id IN ('id1', 'id2'))
 		// DuckDB represents IN as a BOUND_OPERATOR with children: [column, value1, value2, ...]
@@ -665,7 +689,7 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			if (op.children.size() == 1 &&
 			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 				auto &conjunction = op.children[0]->Cast<BoundConjunctionExpression>();
-				fprintf(stderr, "[DEBUG] Found CONJUNCTION inside OPERATOR, type=%d, children=%lu\n",
+				DUCKDB_LOG_DEBUG(context, "Found CONJUNCTION inside OPERATOR, type=%d, children=%lu",
 				        (int)conjunction.type, (unsigned long)conjunction.children.size());
 
 				// Only handle OR conjunctions (IN clauses become OR of equalities)
@@ -698,11 +722,12 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 					// If we successfully extracted all crawl_id values from IN clause
 					if (all_crawl_id_comparisons && !crawl_id_values.empty()) {
 						bind_data.crawl_ids = crawl_id_values;
-						fprintf(stderr, "[DEBUG] IN clause detected with %lu crawl_ids\n",
-						        (unsigned long)crawl_id_values.size());
+						string ids_str;
 						for (const auto &id : crawl_id_values) {
-							fprintf(stderr, "[DEBUG]   - %s\n", id.c_str());
+							ids_str += id + " ";
 						}
+						DUCKDB_LOG_DEBUG(context, "IN clause detected with %lu crawl_ids: %s",
+						        (unsigned long)crawl_id_values.size(), ids_str.c_str());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -713,10 +738,52 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		// Handle BOUND_FUNCTION for LIKE expressions
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &func = filter->Cast<BoundFunctionExpression>();
-			fprintf(stderr, "[DEBUG] Function name: %s\n", func.function.name.c_str());
+			DUCKDB_LOG_DEBUG(context, "Function name: %s, children: %lu", func.function.name.c_str(), (unsigned long)func.children.size());
 
+			// Check if this is a SUFFIX function (DuckDB optimizes LIKE '%string' to suffix)
+			if (func.function.name == "suffix") {
+				// SUFFIX has 2 children: column and suffix string
+				if (func.children.size() >= 2 &&
+				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+					string column_name = col_ref.GetName();
+
+					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string suffix_string = constant.value.ToString();
+						// Convert to CDX wildcard pattern: *suffix_string
+						bind_data.url_filter = "*" + suffix_string;
+						DUCKDB_LOG_DEBUG(context, "SUFFIX URL filter: '%s' -> '%s'", suffix_string.c_str(), bind_data.url_filter.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+			// Check if this is a PREFIX function (DuckDB optimizes LIKE 'string%' to prefix)
+			else if (func.function.name == "prefix") {
+				// PREFIX has 2 children: column and prefix string
+				if (func.children.size() >= 2 &&
+				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+					string column_name = col_ref.GetName();
+
+					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string prefix_string = constant.value.ToString();
+						// Convert to CDX wildcard pattern: prefix_string*
+						bind_data.url_filter = prefix_string + "*";
+						DUCKDB_LOG_DEBUG(context, "PREFIX URL filter: '%s' -> '%s'", prefix_string.c_str(), bind_data.url_filter.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
 			// Check if this is a CONTAINS function (DuckDB optimizes LIKE '%string%' to contains)
-			if (func.function.name == "contains") {
+			else if (func.function.name == "contains") {
 				// CONTAINS has 2 children: column and search string
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -728,10 +795,9 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string search_string = constant.value.ToString();
-						fprintf(stderr, "[DEBUG] CONTAINS URL filter search string: '%s'\n", search_string.c_str());
 						// Convert to CDX wildcard pattern: *search_string*
 						bind_data.url_filter = "*" + search_string + "*";
-						fprintf(stderr, "[DEBUG] CONTAINS URL filter pattern: '%s'\n", bind_data.url_filter.c_str());
+						DUCKDB_LOG_DEBUG(context, "CONTAINS URL filter: '%s' -> '%s'", search_string.c_str(), bind_data.url_filter.c_str());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -750,10 +816,9 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string original_pattern = constant.value.ToString();
-						fprintf(stderr, "[DEBUG] LIKE URL filter original pattern: '%s'\n", original_pattern.c_str());
 						// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
 						bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
-						fprintf(stderr, "[DEBUG] LIKE URL filter converted pattern: '%s'\n", bind_data.url_filter.c_str());
+						DUCKDB_LOG_DEBUG(context, "LIKE URL filter: '%s' -> '%s'", original_pattern.c_str(), bind_data.url_filter.c_str());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -765,6 +830,53 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		if (filter->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
 			continue;
 		}
+
+		// Handle timestamp range comparisons (>, >=, <, <=) for automatic crawl_id lookup
+		if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
+		    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO ||
+		    filter->type == ExpressionType::COMPARE_LESSTHAN ||
+		    filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+			auto &comparison = filter->Cast<BoundComparisonExpression>();
+
+			// Check if left side is a timestamp column reference
+			if (comparison.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = comparison.left->Cast<BoundColumnRefExpression>();
+
+				if (col_ref.GetName() == "timestamp" &&
+				    comparison.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &constant = comparison.right->Cast<BoundConstantExpression>();
+
+					// Handle both TIMESTAMP and VARCHAR types
+					timestamp_t ts_value;
+					if (constant.value.type().id() == LogicalTypeId::TIMESTAMP ||
+					    constant.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+						// timestamp_t is internally int64_t, get it directly
+						ts_value = timestamp_t(constant.value.GetValue<int64_t>());
+					} else if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						// Parse string like '2024-01-01' to timestamp
+						string ts_str = constant.value.ToString();
+						ts_value = Timestamp::FromString(ts_str, false); // false = don't use offset
+					} else {
+						continue; // Unsupported type
+					}
+
+					// Set timestamp_from or timestamp_to based on comparison type
+					if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
+					    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+						bind_data.timestamp_from = ts_value;
+						bind_data.has_timestamp_filter = true;
+						DUCKDB_LOG_DEBUG(context, "Timestamp FROM filter: %s", Timestamp::ToString(ts_value).c_str());
+					} else {
+						bind_data.timestamp_to = ts_value;
+						bind_data.has_timestamp_filter = true;
+						DUCKDB_LOG_DEBUG(context, "Timestamp TO filter: %s", Timestamp::ToString(ts_value).c_str());
+					}
+					// Don't remove filter - DuckDB will still apply it for exact row filtering
+					continue;
+				}
+			}
+		}
+
 		if (filter->type != ExpressionType::COMPARE_EQUAL &&
 		    filter->type != ExpressionType::COMPARE_NOTEQUAL) {
 			continue;
@@ -798,17 +910,16 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		// Handle URL filtering (special case - uses url parameter)
 		if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 			string original_pattern = constant.value.ToString();
-			fprintf(stderr, "[DEBUG] URL filter original pattern: '%s'\n", original_pattern.c_str());
 			// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
 			bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
-			fprintf(stderr, "[DEBUG] URL filter converted pattern: '%s'\n", bind_data.url_filter.c_str());
+			DUCKDB_LOG_DEBUG(context, "URL filter: '%s' -> '%s'", original_pattern.c_str(), bind_data.url_filter.c_str());
 			filters_to_remove.push_back(i);
 		}
 		// Handle crawl_id filtering (sets the index_name to use)
 		else if (column_name == "crawl_id" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 			if (filter->type == ExpressionType::COMPARE_EQUAL) {
 				bind_data.index_name = constant.value.ToString();
-				fprintf(stderr, "[DEBUG] crawl_id filter set index_name to: %s\n", bind_data.index_name.c_str());
+				DUCKDB_LOG_DEBUG(context, "crawl_id filter set index_name to: %s", bind_data.index_name.c_str());
 				filters_to_remove.push_back(i);
 			}
 		}
@@ -889,11 +1000,6 @@ void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			// For common_crawl with multiple crawl_ids, divide limit across crawl_ids
 			if (!bind_data.crawl_ids.empty()) {
 				limit_value = (limit_value + bind_data.crawl_ids.size() - 1) / bind_data.crawl_ids.size();
-				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu (divided across %lu crawl_ids)\n",
-				        (unsigned long)limit_value, (unsigned long)bind_data.crawl_ids.size());
-			} else {
-				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
-				        (unsigned long)limit_value);
 			}
 			bind_data.max_results = limit_value;
 

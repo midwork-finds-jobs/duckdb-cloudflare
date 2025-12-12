@@ -447,3 +447,48 @@ LIMIT 1;
 ----
 true
 
+# ============================================
+# URL SUFFIX (LIKE '%.domain.com') TESTS
+# ============================================
+
+# Test URL suffix pattern (subdomains) uses matchType=domain
+query I
+SELECT cdx_url LIKE '%url=*.example.com%' FROM internet_archive()
+WHERE url LIKE '%.example.com'
+LIMIT 1;
+----
+true
+
+# Test URL suffix with different domain
+query I
+SELECT cdx_url LIKE '%url=*.example.org%' FROM internet_archive()
+WHERE url LIKE '%.example.org'
+LIMIT 1;
+----
+true
+
+# Test URL suffix combined with other filters
+query I
+SELECT
+    cdx_url LIKE '%url=*.example.com%'
+    AND cdx_url LIKE '%filter=statuscode:200%'
+    AND cdx_url LIKE '%&limit=5%'
+FROM internet_archive()
+WHERE url LIKE '%.example.com'
+  AND statuscode = 200
+LIMIT 5;
+----
+true
+
+# Test URL suffix with timestamp filter
+query I
+SELECT
+    cdx_url LIKE '%url=*.example.com%'
+    AND cdx_url LIKE '%&from=2024%'
+FROM internet_archive()
+WHERE url LIKE '%.example.com'
+  AND timestamp > '2024-01-01'
+LIMIT 1;
+----
+true
+

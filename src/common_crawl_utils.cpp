@@ -1,6 +1,7 @@
 #include "common_crawl_utils.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/logging/logger.hpp"
 
 namespace duckdb {
 
@@ -135,14 +136,8 @@ Value SafeStringValue(const string &str) {
 	try {
 		string sanitized = SanitizeUTF8(str);
 		return Value(sanitized);
-	} catch (const std::exception &ex) {
-		// If sanitization still fails, return empty string
-		fprintf(stderr, "[ERROR] Failed to create Value for string: %s (error: %s)\n",
-		        str.substr(0, 100).c_str(), ex.what());
-		return Value("");
 	} catch (...) {
-		fprintf(stderr, "[ERROR] Failed to create Value for string: %s (unknown error)\n",
-		        str.substr(0, 100).c_str());
+		// If sanitization fails, return empty string (no context for logging)
 		return Value("");
 	}
 }
@@ -412,42 +407,178 @@ WARCResponse ParseWARCResponse(const string &warc_data) {
 // COLLINFO CACHE
 // ========================================
 
-string GetLatestCrawlId(ClientContext &context) {
-	// Check if cache is valid and not expired
-	if (!g_collinfo_cache.IsExpired()) {
-		return g_collinfo_cache.latest_crawl_id;
+// Parse ISO 8601 timestamp (e.g., "2025-11-06T20:07:18") to DuckDB timestamp
+static timestamp_t ParseISO8601Timestamp(const string &iso_timestamp) {
+	if (iso_timestamp.length() < 19) {
+		return timestamp_t(0); // Invalid format
 	}
 
-	// Fetch collinfo.json using httpfs and json extension
-	fprintf(stderr, "[DEBUG] Fetching latest crawl_id from collinfo.json\n");
+	try {
+		int32_t year = std::stoi(iso_timestamp.substr(0, 4));
+		int32_t month = std::stoi(iso_timestamp.substr(5, 2));
+		int32_t day = std::stoi(iso_timestamp.substr(8, 2));
+		int32_t hour = std::stoi(iso_timestamp.substr(11, 2));
+		int32_t minute = std::stoi(iso_timestamp.substr(14, 2));
+		int32_t second = std::stoi(iso_timestamp.substr(17, 2));
+
+		date_t date = Date::FromDate(year, month, day);
+		dtime_t time = Time::FromTime(hour, minute, second, 0);
+		return Timestamp::FromDatetime(date, time);
+	} catch (...) {
+		return timestamp_t(0);
+	}
+}
+
+// Helper to extract JSON string value from a simple JSON object
+static string ExtractJSONStringField(const string &json, const string &field) {
+	string search = "\"" + field + "\":\"";
+	size_t start = json.find(search);
+	if (start == string::npos) {
+		// Try with space after colon
+		search = "\"" + field + "\": \"";
+		start = json.find(search);
+		if (start == string::npos) return "";
+	}
+	start += search.length();
+	size_t end = json.find("\"", start);
+	if (end == string::npos) return "";
+	return json.substr(start, end - start);
+}
+
+// Fetch and cache all crawl infos from collinfo.json
+static void FetchCollInfo(ClientContext &context) {
+	DUCKDB_LOG_DEBUG(context, "Fetching collinfo.json +%.0fms", ElapsedMs());
 
 	string collinfo_url = "https://index.commoncrawl.org/collinfo.json";
-	Connection con(context.db->GetDatabase(context));
 
-	// Ensure json extension is loaded
-	con.Query("INSTALL json");
-	con.Query("LOAD json");
+	// Set force_download globally to skip HEAD request for this fetch
+	context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
 
-	// Read the first entry from collinfo.json (newest crawl)
-	auto result = con.Query("SELECT id FROM read_json('" + collinfo_url + "') LIMIT 1");
+	// Use FileSystem to fetch directly
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto file_handle = fs.OpenFile(collinfo_url, FileFlags::FILE_FLAGS_READ);
 
-	if (result->HasError()) {
-		throw IOException("Failed to fetch collinfo.json: " + result->GetError());
+	// Read entire response
+	string response_data;
+	const idx_t buffer_size = 8192;
+	auto buffer = unique_ptr<char[]>(new char[buffer_size]);
+
+	while (true) {
+		int64_t bytes_read = file_handle->Read(buffer.get(), buffer_size);
+		if (bytes_read <= 0) break;
+		response_data.append(buffer.get(), bytes_read);
 	}
 
-	if (result->RowCount() == 0) {
-		throw IOException("collinfo.json returned no results");
+	if (response_data.empty()) {
+		throw IOException("Failed to fetch collinfo.json: empty response");
 	}
 
-	auto latest_id = result->GetValue(0, 0).ToString();
+	// Clear and populate cache
+	g_collinfo_cache.crawl_infos.clear();
+	g_collinfo_cache.latest_crawl_id = "";
 
-	// Update cache
-	g_collinfo_cache.latest_crawl_id = latest_id;
+	// Parse JSON array manually - each entry is an object with id, name, from, to
+	// Format: [{"id": "CC-MAIN-2025-47", "name": "November 2025 Index", "from": "2025-11-06T20:07:18", "to": "2025-11-19T12:34:13", ...}, ...]
+	size_t pos = 0;
+	while ((pos = response_data.find("\"id\":", pos)) != string::npos) {
+		// Find the start of this object (go back to find '{')
+		size_t obj_start = response_data.rfind("{", pos);
+		if (obj_start == string::npos) {
+			pos++;
+			continue;
+		}
+
+		// Find the end of this object - but skip nested braces if any
+		size_t obj_end = response_data.find("}", pos);
+		if (obj_end == string::npos) break;
+
+		string obj = response_data.substr(obj_start, obj_end - obj_start + 1);
+
+		CrawlInfo info;
+		info.id = ExtractJSONStringField(obj, "id");
+		info.name = ExtractJSONStringField(obj, "name");
+		string from_str = ExtractJSONStringField(obj, "from");
+		string to_str = ExtractJSONStringField(obj, "to");
+
+		if (!info.id.empty()) {
+			info.from_ts = ParseISO8601Timestamp(from_str);
+			info.to_ts = ParseISO8601Timestamp(to_str);
+			g_collinfo_cache.crawl_infos.push_back(info);
+
+			// First entry is the latest
+			if (g_collinfo_cache.latest_crawl_id.empty()) {
+				g_collinfo_cache.latest_crawl_id = info.id;
+			}
+		}
+
+		pos = obj_end + 1;
+	}
+
+	if (g_collinfo_cache.crawl_infos.empty()) {
+		throw IOException("collinfo.json parsing failed: no valid entries found");
+	}
+
 	g_collinfo_cache.cached_at = std::chrono::system_clock::now();
 	g_collinfo_cache.is_valid = true;
 
-	fprintf(stderr, "[DEBUG] Latest crawl_id: %s\n", latest_id.c_str());
-	return latest_id;
+	DUCKDB_LOG_DEBUG(context, "Cached %lu crawl infos, latest: %s +%.0fms",
+	        (unsigned long)g_collinfo_cache.crawl_infos.size(),
+	        g_collinfo_cache.latest_crawl_id.c_str(), ElapsedMs());
+}
+
+string GetLatestCrawlId(ClientContext &context) {
+	// Check if cache is valid and not expired
+	if (g_collinfo_cache.IsExpired()) {
+		FetchCollInfo(context);
+	}
+	return g_collinfo_cache.latest_crawl_id;
+}
+
+const vector<CrawlInfo> &GetCrawlInfos(ClientContext &context) {
+	// Check if cache is valid and not expired
+	if (g_collinfo_cache.IsExpired()) {
+		FetchCollInfo(context);
+	}
+	return g_collinfo_cache.crawl_infos;
+}
+
+vector<string> GetCrawlIdsForTimestampRange(ClientContext &context, timestamp_t from_ts, timestamp_t to_ts) {
+	const auto &crawl_infos = GetCrawlInfos(context);
+	vector<string> matching_ids;
+
+	// Handle cases where one or both bounds are not specified (timestamp_t(0) means unset)
+	bool has_from = from_ts.value != 0;
+	bool has_to = to_ts.value != 0;
+
+	DUCKDB_LOG_DEBUG(context, "Looking for crawls in range: from=%lld to=%lld +%.0fms",
+	        (long long)from_ts.value, (long long)to_ts.value, ElapsedMs());
+
+	for (const auto &info : crawl_infos) {
+		// A crawl overlaps with the query range if:
+		// - crawl.to >= query.from (crawl ends after or when query starts)
+		// - crawl.from <= query.to (crawl starts before or when query ends)
+		bool overlaps = true;
+
+		if (has_from && info.to_ts.value < from_ts.value) {
+			// Crawl ended before query range starts
+			overlaps = false;
+		}
+		if (has_to && info.from_ts.value > to_ts.value) {
+			// Crawl started after query range ends
+			overlaps = false;
+		}
+
+		if (overlaps) {
+			matching_ids.push_back(info.id);
+			DUCKDB_LOG_DEBUG(context, "  Matched crawl: %s (from=%lld to=%lld)",
+			        info.id.c_str(), (long long)info.from_ts.value, (long long)info.to_ts.value);
+		}
+	}
+
+	DUCKDB_LOG_DEBUG(context, "Found %lu matching crawls +%.0fms",
+	        (unsigned long)matching_ids.size(), ElapsedMs());
+
+	return matching_ids;
 }
 
 } // namespace duckdb

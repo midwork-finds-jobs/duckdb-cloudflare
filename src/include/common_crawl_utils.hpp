@@ -121,9 +121,20 @@ struct ArchiveOrgRecord {
 // COLLINFO CACHE
 // ========================================
 
+// Structure to hold crawl information from collinfo.json
+struct CrawlInfo {
+	string id;           // e.g., "CC-MAIN-2025-47"
+	string name;         // e.g., "November 2025 Index"
+	timestamp_t from_ts; // Start of crawl period
+	timestamp_t to_ts;   // End of crawl period
+
+	CrawlInfo() : from_ts(timestamp_t(0)), to_ts(timestamp_t(0)) {}
+};
+
 // Cache for collinfo.json (1 day TTL)
 struct CollInfoCache {
 	string latest_crawl_id;
+	vector<CrawlInfo> crawl_infos;  // Full list of crawl info with dates
 	std::chrono::system_clock::time_point cached_at;
 	bool is_valid;
 
@@ -141,6 +152,12 @@ extern CollInfoCache g_collinfo_cache;
 
 // Helper function to fetch the latest crawl_id from collinfo.json (with 1-day caching)
 string GetLatestCrawlId(ClientContext &context);
+
+// Helper function to get all crawl infos (with 1-day caching)
+const vector<CrawlInfo> &GetCrawlInfos(ClientContext &context);
+
+// Helper function to find crawl_ids that overlap with a given timestamp range
+vector<string> GetCrawlIdsForTimestampRange(ClientContext &context, timestamp_t from_ts, timestamp_t to_ts);
 
 // ========================================
 // FORWARD DECLARATIONS FOR TABLE FUNCTIONS

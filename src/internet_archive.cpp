@@ -1,5 +1,6 @@
 #include "common_crawl_utils.hpp"
 #include <set>
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -126,7 +127,7 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
                                                      const vector<string> &cdx_filters, const string &from_date,
                                                      const string &to_date, idx_t max_results, const string &collapse,
                                                      bool fast_latest, idx_t offset, string &out_cdx_url) {
-	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX started\n", ElapsedMs());
+	DUCKDB_LOG_DEBUG(context, "QueryArchiveOrgCDX started +%.0fms", ElapsedMs());
 	vector<ArchiveOrgRecord> records;
 
 	// Build the CDX URL
@@ -143,8 +144,8 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 			field_list += f;
 		}
 	}
-	fprintf(stderr, "[DEBUG] Internet Archive CDX fields: %s\n", field_list.c_str());
-	fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), cdx_url.c_str());
+	DUCKDB_LOG_DEBUG(context, "Internet Archive CDX fields: %s", field_list.c_str());
+	DUCKDB_LOG_DEBUG(context, "CDX URL +%.0fms: %s", ElapsedMs(), cdx_url.c_str());
 
 	// Store the CDX URL for output
 	out_cdx_url = cdx_url;
@@ -224,7 +225,7 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 			}
 			records.push_back(record);
 		}
-		fprintf(stderr, "[DEBUG] Parsed %d CSV lines, got %lu records\n", line_count, (unsigned long)records.size());
+		DUCKDB_LOG_DEBUG(context, "Parsed %d CSV lines, got %lu records", line_count, (unsigned long)records.size());
 
 	} catch (std::exception &ex) {
 		throw IOException("Error querying Internet Archive CDX API: " + string(ex.what()));
@@ -246,7 +247,7 @@ static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &
 	try {
 		// Construct the download URL with id_ suffix to get raw content
 		string download_url = "https://web.archive.org/web/" + record.timestamp + "id_/" + record.original;
-		fprintf(stderr, "[DEBUG] Fetching: %s\n", download_url.c_str());
+		DUCKDB_LOG_DEBUG(context, "Fetching archived page: %s", download_url.c_str());
 
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);
@@ -281,7 +282,7 @@ static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &
 static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	g_start_time = std::chrono::steady_clock::now();
-	fprintf(stderr, "[DEBUG +%.0fms] InternetArchiveBind called\n", ElapsedMs());
+	DUCKDB_LOG_DEBUG(context, "InternetArchiveBind called +%.0fms", ElapsedMs());
 
 	auto bind_data = make_uniq<InternetArchiveBindData>();
 
@@ -292,13 +293,13 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 				throw BinderException("internet_archive max_results parameter must be an integer");
 			}
 			bind_data->max_results = kv.second.GetValue<int64_t>();
-			fprintf(stderr, "[DEBUG] CDX API max_results set to: %lu\n", (unsigned long)bind_data->max_results);
+			DUCKDB_LOG_DEBUG(context, "CDX API max_results set to: %lu", (unsigned long)bind_data->max_results);
 		} else if (kv.first == "collapse") {
 			if (kv.second.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("internet_archive collapse parameter must be a string");
 			}
 			bind_data->collapse = kv.second.GetValue<string>();
-			fprintf(stderr, "[DEBUG] CDX API collapse set to: %s\n", bind_data->collapse.c_str());
+			DUCKDB_LOG_DEBUG(context, "CDX API collapse set to: %s", bind_data->collapse.c_str());
 		} else {
 			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
 		}
@@ -352,7 +353,7 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 // Init global state function for internet_archive
 static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
-	fprintf(stderr, "[DEBUG +%.0fms] InternetArchiveInitGlobal called\n", ElapsedMs());
+	DUCKDB_LOG_DEBUG(context, "InternetArchiveInitGlobal called +%.0fms", ElapsedMs());
 	auto &bind_data = const_cast<InternetArchiveBindData&>(input.bind_data->Cast<InternetArchiveBindData>());
 
 	// Validate URL filter - don't allow queries without a specific URL
@@ -371,7 +372,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 	for (auto &col_id : input.column_ids) {
 		if (col_id < bind_data.column_names.size()) {
 			string col_name = bind_data.column_names[col_id];
-			fprintf(stderr, "[DEBUG] Projected column: %s\n", col_name.c_str());
+			DUCKDB_LOG_DEBUG(context, "Projected column: %s", col_name.c_str());
 
 			if (col_name == "url") {
 				bind_data.fields_needed.push_back("original");
@@ -389,7 +390,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 				bind_data.fields_needed.push_back("length");
 			} else if (col_name == "response") {
 				bind_data.fetch_response = true;
-				fprintf(stderr, "[DEBUG] Will fetch response bodies\n");
+				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
 			} else if (col_name == "cdx_url") {
 				// cdx_url doesn't need any CDX fields
 			}
@@ -401,12 +402,12 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 
 	if (bind_data.cdx_url_only) {
 		// Only cdx_url is selected - build URL without network request
-		fprintf(stderr, "[DEBUG] Only cdx_url selected - skipping network request\n");
+		DUCKDB_LOG_DEBUG(context, "Only cdx_url selected - skipping network request");
 		bind_data.cdx_url = BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type,
 		                                           bind_data.fields_needed, bind_data.cdx_filters,
 		                                           bind_data.from_date, bind_data.to_date, bind_data.max_results,
 		                                           bind_data.collapse, bind_data.fast_latest, bind_data.offset);
-		fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), bind_data.cdx_url.c_str());
+		DUCKDB_LOG_DEBUG(context, "CDX URL +%.0fms: %s", ElapsedMs(), bind_data.cdx_url.c_str());
 
 		// Create a single dummy record so we return one row with the cdx_url
 		ArchiveOrgRecord dummy;
@@ -419,7 +420,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		                                     bind_data.collapse, bind_data.fast_latest, bind_data.offset, bind_data.cdx_url);
 	}
 
-	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX returned %lu records\n", ElapsedMs(), (unsigned long)state->records.size());
+	DUCKDB_LOG_DEBUG(context, "QueryArchiveOrgCDX returned %lu records +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 
 	return std::move(state);
 }
@@ -434,7 +435,7 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 	idx_t chunk_size = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.records.size() - gstate.current_position);
 
 	if (bind_data.fetch_response && chunk_size > 0) {
-		fprintf(stderr, "[DEBUG] Pre-fetching %lu archived pages in parallel\n", (unsigned long)chunk_size);
+		DUCKDB_LOG_DEBUG(context, "Pre-fetching %lu archived pages in parallel", (unsigned long)chunk_size);
 		std::vector<std::future<string>> response_futures;
 		response_futures.reserve(chunk_size);
 
@@ -451,7 +452,7 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 		for (auto &future : response_futures) {
 			response_bodies.push_back(future.get());
 		}
-		fprintf(stderr, "[DEBUG] All %lu archived pages fetched\n", (unsigned long)chunk_size);
+		DUCKDB_LOG_DEBUG(context, "All %lu archived pages fetched", (unsigned long)chunk_size);
 	}
 
 	idx_t output_offset = 0;
@@ -498,7 +499,7 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
 				}
 			} catch (const std::exception &ex) {
-				fprintf(stderr, "[ERROR] Failed to process column %s: %s\n", col_name.c_str(), ex.what());
+				DUCKDB_LOG_ERROR(context, "Failed to process column %s: %s", col_name.c_str(), ex.what());
 			}
 		}
 
@@ -549,7 +550,7 @@ static string EscapeRegex(const string &val) {
 
 // Helper to check if column supports CDX regex and add filter
 // Returns true if filter was added
-static bool TryAddCdxRegexFilter(InternetArchiveBindData &bind_data, const string &col_name,
+static bool TryAddCdxRegexFilter(ClientContext &context, InternetArchiveBindData &bind_data, const string &col_name,
                                    const string &filter_pattern, const string &debug_label,
                                    bool negate = false) {
 	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
@@ -557,14 +558,13 @@ static bool TryAddCdxRegexFilter(InternetArchiveBindData &bind_data, const strin
 	}
 	string filter_str = (negate ? "!" : "") + col_name + ":" + filter_pattern;
 	bind_data.cdx_filters.push_back(filter_str);
-	fprintf(stderr, "[DEBUG +%.0fms] %s %s: %s\n", ElapsedMs(),
-	        col_name.c_str(), debug_label.c_str(), filter_str.c_str());
+	DUCKDB_LOG_DEBUG(context, "%s %s: %s +%.0fms", col_name.c_str(), debug_label.c_str(), filter_str.c_str(), ElapsedMs());
 	return true;
 }
 
 // Helper to handle IN expression for CDX columns (statuscode, mimetype)
 // Converts IN (val1, val2, ...) to regex alternation (val1|val2|...)
-static bool TryHandleInExpression(InternetArchiveBindData &bind_data, BoundOperatorExpression &op,
+static bool TryHandleInExpression(ClientContext &context, InternetArchiveBindData &bind_data, BoundOperatorExpression &op,
                                     const string &col_name, bool is_integer) {
 	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
 		return false;
@@ -606,14 +606,14 @@ static bool TryHandleInExpression(InternetArchiveBindData &bind_data, BoundOpera
 
 	string filter_str = col_name + ":" + regex_pattern;
 	bind_data.cdx_filters.push_back(filter_str);
-	fprintf(stderr, "[DEBUG +%.0fms] %s IN -> %s\n", ElapsedMs(), col_name.c_str(), filter_str.c_str());
+	DUCKDB_LOG_DEBUG(context, "%s IN -> %s +%.0fms", col_name.c_str(), filter_str.c_str(), ElapsedMs());
 	return true;
 }
 
 // Filter pushdown for internet_archive
 static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                    vector<unique_ptr<Expression>> &filters) {
-	fprintf(stderr, "[DEBUG +%.0fms] InternetArchivePushdownComplexFilter called with %lu filters\n", ElapsedMs(), (unsigned long)filters.size());
+	DUCKDB_LOG_DEBUG(context, "InternetArchivePushdownComplexFilter called with %lu filters +%.0fms", (unsigned long)filters.size(), ElapsedMs());
 	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
 
 	// Build column map
@@ -648,7 +648,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 							bind_data.url_filter[pos] = '*';
 						}
 					}
-					fprintf(stderr, "[DEBUG +%.0fms] URL LIKE: %s\n", ElapsedMs(), bind_data.url_filter.c_str());
+					DUCKDB_LOG_DEBUG(context, "URL LIKE: %s +%.0fms", bind_data.url_filter.c_str(), ElapsedMs());
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -659,7 +659,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string like_pattern = constant.value.ToString();
 					string regex_pattern = LikeToRegex(like_pattern);
-					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "LIKE");
+					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "LIKE");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -681,7 +681,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 					string regex_pattern = LikeToRegex(like_pattern);
 					string filter_str = "!original:" + regex_pattern;
 					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] url NOT LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+					DUCKDB_LOG_DEBUG(context, "url NOT LIKE: %s -> %s +%.0fms", like_pattern.c_str(), filter_str.c_str(), ElapsedMs());
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -693,7 +693,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 					string regex_pattern = LikeToRegex(like_pattern);
 					string filter_str = "!" + col_name + ":" + regex_pattern;
 					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] %s NOT LIKE: %s -> %s\n", ElapsedMs(), col_name.c_str(), like_pattern.c_str(), filter_str.c_str());
+					DUCKDB_LOG_DEBUG(context, "%s NOT LIKE: %s -> %s +%.0fms", col_name.c_str(), like_pattern.c_str(), filter_str.c_str(), ElapsedMs());
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -709,10 +709,22 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
 
+				// Handle suffix(url, '.domain.com') -> url=*.domain.com
+				// CDX server auto-detects matchType from wildcard pattern, no need to specify
+				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string suffix_val = constant.value.ToString();
+					// For URL suffix like '.example.com', use wildcard prefix
+					bind_data.url_filter = "*" + suffix_val;
+					// Don't set match_type - let CDX server auto-detect from pattern
+					DUCKDB_LOG_DEBUG(context, "URL suffix: %s +%.0fms", bind_data.url_filter.c_str(), ElapsedMs());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string suffix_val = constant.value.ToString();
-					TryAddCdxRegexFilter(bind_data, col_name, ".*" + suffix_val + "$", "suffix");
+					TryAddCdxRegexFilter(context, bind_data, col_name, ".*" + suffix_val + "$", "suffix");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -731,7 +743,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				// Handle prefix(url, 'pattern') -> url=pattern* (special case)
 				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					bind_data.url_filter = constant.value.ToString() + "*";
-					fprintf(stderr, "[DEBUG +%.0fms] URL prefix: %s\n", ElapsedMs(), bind_data.url_filter.c_str());
+					DUCKDB_LOG_DEBUG(context, "URL prefix: %s +%.0fms", bind_data.url_filter.c_str(), ElapsedMs());
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -740,7 +752,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string prefix_val = constant.value.ToString();
-					TryAddCdxRegexFilter(bind_data, col_name, "^" + prefix_val + ".*", "prefix");
+					TryAddCdxRegexFilter(context, bind_data, col_name, "^" + prefix_val + ".*", "prefix");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -759,7 +771,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string escaped = EscapeRegex(constant.value.ToString());
-					TryAddCdxRegexFilter(bind_data, col_name, ".*" + escaped + ".*", "contains");
+					TryAddCdxRegexFilter(context, bind_data, col_name, ".*" + escaped + ".*", "contains");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -778,7 +790,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string regex_pattern = constant.value.ToString();
-					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "regex");
+					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "regex");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -798,7 +810,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string sql_regex = constant.value.ToString();
 					string regex_pattern = SqlRegexToJavaRegex(sql_regex);
-					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "SIMILAR TO");
+					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "SIMILAR TO");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -828,7 +840,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string regex_pattern = constant.value.ToString();
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT regex: %s\n", ElapsedMs(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "urlkey NOT regex: %s +%.0fms", filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -850,7 +862,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string regex_pattern = LikeToRegex(like_pattern);
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "urlkey NOT LIKE: %s -> %s +%.0fms", like_pattern.c_str(), filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -861,7 +873,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string regex_pattern = LikeToRegex(like_pattern);
 						string filter_str = "!original:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] url NOT LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "url NOT LIKE: %s -> %s +%.0fms", like_pattern.c_str(), filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -880,7 +892,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string suffix_val = constant.value.ToString();
 						string filter_str = "!urlkey:.*" + suffix_val + "$";
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT suffix: %s\n", ElapsedMs(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "urlkey NOT suffix: %s +%.0fms", filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -899,7 +911,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string prefix_val = constant.value.ToString();
 						string filter_str = "!urlkey:^" + prefix_val + ".*";
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT prefix: %s\n", ElapsedMs(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "urlkey NOT prefix: %s +%.0fms", filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -919,7 +931,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string regex_pattern = SqlRegexToJavaRegex(sql_regex);
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT SIMILAR TO: %s -> %s\n", ElapsedMs(), sql_regex.c_str(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "urlkey NOT SIMILAR TO: %s -> %s +%.0fms", sql_regex.c_str(), filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -951,7 +963,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 						string cdx_field = (col_name == "url") ? "original" : col_name;
 						string filter_str = "!" + cdx_field + ":.*" + escaped + ".*";
 						bind_data.cdx_filters.push_back(filter_str);
-						fprintf(stderr, "[DEBUG +%.0fms] %s NOT contains: %s\n", ElapsedMs(), col_name.c_str(), filter_str.c_str());
+						DUCKDB_LOG_DEBUG(context, "%s NOT contains: %s +%.0fms", col_name.c_str(), filter_str.c_str(), ElapsedMs());
 						filters_to_remove.push_back(i);
 						continue;
 					}
@@ -973,7 +985,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				// statuscode is integer, mimetype is string
 				bool is_integer = (col_name == "statuscode");
-				if (TryHandleInExpression(bind_data, op, col_name, is_integer)) {
+				if (TryHandleInExpression(context, bind_data, op, col_name, is_integer)) {
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -993,8 +1005,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 					bind_data.from_date = ToCdxTimestamp(lower_const.value.ToString());
 					bind_data.to_date = ToCdxTimestamp(upper_const.value.ToString());
-					fprintf(stderr, "[DEBUG +%.0fms] BETWEEN from=%s to=%s\n", ElapsedMs(),
-					        bind_data.from_date.c_str(), bind_data.to_date.c_str());
+					DUCKDB_LOG_DEBUG(context, "BETWEEN from=%s to=%s +%.0fms", bind_data.from_date.c_str(), bind_data.to_date.c_str(), ElapsedMs());
 
 					filters_to_remove.push_back(i);
 					continue;
@@ -1022,7 +1033,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 			if (filter->type == ExpressionType::COMPARE_EQUAL) {
 				bind_data.url_filter = constant.value.ToString();
 				bind_data.match_type = "exact";
-				fprintf(stderr, "[DEBUG] URL filter (exact): %s\n", bind_data.url_filter.c_str());
+				DUCKDB_LOG_DEBUG(context, "URL filter (exact): %s", bind_data.url_filter.c_str());
 				filters_to_remove.push_back(i);
 			}
 		}
@@ -1065,12 +1076,12 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 			if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
 			    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
 				bind_data.from_date = cdx_timestamp;
-				fprintf(stderr, "[DEBUG +%.0fms] Timestamp from: %s\n", ElapsedMs(), cdx_timestamp.c_str());
+				DUCKDB_LOG_DEBUG(context, "Timestamp from: %s +%.0fms", cdx_timestamp.c_str(), ElapsedMs());
 				filters_to_remove.push_back(i);
 			} else if (filter->type == ExpressionType::COMPARE_LESSTHAN ||
 			           filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
 				bind_data.to_date = cdx_timestamp;
-				fprintf(stderr, "[DEBUG +%.0fms] Timestamp to: %s\n", ElapsedMs(), cdx_timestamp.c_str());
+				DUCKDB_LOG_DEBUG(context, "Timestamp to: %s +%.0fms", cdx_timestamp.c_str(), ElapsedMs());
 				filters_to_remove.push_back(i);
 			}
 		}
@@ -1100,33 +1111,25 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindDat
 
 	// Check if the first (and ideally only) order is timestamp DESC
 	auto &first_order = top_n.orders[0];
-	fprintf(stderr, "[DEBUG] TOP_N order type: %s\n",
-	        first_order.type == OrderType::DESCENDING ? "DESC" : "ASC");
-
 	if (first_order.type != OrderType::DESCENDING) {
 		return false;
 	}
 
 	// Check if ordering by the timestamp column
 	auto expr_class = first_order.expression->GetExpressionClass();
-	fprintf(stderr, "[DEBUG] TOP_N expression class: %d\n", (int)expr_class);
 
 	if (expr_class == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &col_ref = first_order.expression->Cast<BoundColumnRefExpression>();
 		string col_name = col_ref.GetName();
-		fprintf(stderr, "[DEBUG] TOP_N column name: '%s', alias: '%s'\n",
-		        col_name.c_str(), col_ref.alias.c_str());
 
 		// Check if column name contains "timestamp" (handles qualified names like 'internet_archive."timestamp"')
 		if (col_name.find("timestamp") != string::npos || col_ref.alias.find("timestamp") != string::npos) {
-			fprintf(stderr, "[DEBUG] TOP_N matched timestamp by name\n");
 			return true;
 		}
 
 		// Also check by column binding - timestamp is column index 1 in our schema
 		// (url=0, timestamp=1, urlkey=2, mimetype=3, statuscode=4, digest=5, length=6, response=7, cdx_url=8)
 		if (col_ref.binding.column_index == 1) {
-			fprintf(stderr, "[DEBUG] TOP_N matched timestamp by column index\n");
 			return true;
 		}
 	}
@@ -1168,13 +1171,7 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			// Push down offset if present
 			if (top_n.offset > 0) {
 				bind_data.offset = top_n.offset;
-				fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu, offset=%lu\n",
-				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
-			} else {
-				fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu\n",
-				        (unsigned long)bind_data.max_results);
 			}
-
 			// Keep TOP_N in plan - API returns latest results but not in DESC order
 			// DuckDB will sort them after fetching
 			return;
@@ -1183,11 +1180,6 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			bind_data.max_results = top_n.limit;
 			if (top_n.offset > 0) {
 				bind_data.offset = top_n.offset;
-				fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu, offset=%lu\n",
-				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
-			} else {
-				fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu\n",
-				        (unsigned long)bind_data.max_results);
 			}
 			// Keep TOP_N in plan for non-DESC ordering
 		}
@@ -1247,11 +1239,6 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			// Also push down offset if it's a constant
 			if (has_constant_offset) {
 				bind_data.offset = limit.offset_val.GetConstantValue();
-				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu, offset=%lu\n",
-				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
-			} else {
-				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
-				        (unsigned long)bind_data.max_results);
 			}
 
 			// Remove the LIMIT node from the plan since we've pushed it down
