@@ -26,10 +26,11 @@
     automake
     pkg-config
 
-    # For this extension specifically
+    clang-tools
+
+    # Build dependencies for web_archive_cdx extension
+    zlib
     openssl
-    curl
-    libarchive
   ];
 
   # https://devenv.sh/languages/
@@ -46,17 +47,10 @@
       settings.configuration = {
         # Ignore line lengths for now
         MD013 = false;
-        # Allow inline html as it is used in phoenix default AGENTS.md
-        MD033 = false;
       };
     };
     # Leaking secrets
     ripsecrets.enable = true;
-  };
-  # Prevents unencrypted sops files from being committed
-  git-hooks.hooks.pre-commit-hook-ensure-sops = {
-    enable = true;
-    files = "secret.*\\.(env|ini|yaml|yml|json)$";
   };
 
   # Security hardening to prevent malicious takeover of Github Actions:

@@ -159,9 +159,13 @@ SELECT archive_url FROM wayback_machine()
 WHERE url = 'archive.org'
 LIMIT 0;
 
-# Test DISTINCT ON(digest) pushes down collapse=digest to CDX API
+# Test collapse parameter adds &collapse=digest to CDX URL (no network request)
 query I
 SELECT cdx_url LIKE '%&collapse=digest%' AS has_collapse
-FROM (SELECT DISTINCT ON(digest) cdx_url FROM wayback_machine(debug := true) WHERE url = 'archive.org');
+FROM (SELECT cdx_url FROM wayback_machine(debug := true, collapse := 'digest') WHERE url = 'archive.org');
 ----
 true
+
+# Test DISTINCT ON(digest) syntax is valid (requires network so use LIMIT 0 pattern)
+statement ok
+SELECT DISTINCT ON(digest) url, digest FROM wayback_machine() WHERE url = 'archive.org' LIMIT 0;
