@@ -174,6 +174,7 @@ statement ok
 SELECT DISTINCT ON(digest) url, digest FROM wayback_machine() WHERE url = 'archive.org' LIMIT 0;
 
 # Test DISTINCT ON with LIMIT pushdown (both collapse and limit should be in URL)
+# This test requires network access, so we use the subquery pattern to check the URL
 query II
 SELECT DISTINCT ON(year)
     cdx_url LIKE '%&collapse=timestamp:4%' AS has_collapse,
@@ -189,9 +190,34 @@ FROM wayback_machine(debug := true) WHERE url = 'archive.org';
 ----
 true
 
+# Test DISTINCT ON(month) alone throws error - must use year or year+month
+statement error
+SELECT DISTINCT ON(month) * FROM wayback_machine(debug := true) WHERE url = 'archive.org';
+----
+DISTINCT ON(month) is not supported for wayback_machine()
+
 # Test DISTINCT ON(year, month) adds &collapse=timestamp:6 to CDX URL
 query I
 SELECT DISTINCT ON(year, month) cdx_url LIKE '%&collapse=timestamp:6%' AS has_year_month_collapse
 FROM wayback_machine(debug := true) WHERE url = 'archive.org';
 ----
 true
+
+# Test DISTINCT ON(urlkey[:6]) prefix collapse adds &collapse=urlkey:6 to CDX URL
+query I
+SELECT DISTINCT ON(urlkey[:6]) cdx_url LIKE '%&collapse=urlkey:6%' AS has_prefix_collapse
+FROM wayback_machine(debug := true) WHERE url = 'archive.org';
+----
+true
+
+# Test DISTINCT ON(digest, statuscode) adds BOTH &collapse=digest AND &collapse=statuscode
+query II
+SELECT DISTINCT ON(digest, statuscode)
+    cdx_url LIKE '%&collapse=digest%' AS has_digest_collapse,
+    cdx_url LIKE '%&collapse=statuscode%' AS has_statuscode_collapse
+FROM wayback_machine(debug := true) WHERE url = 'archive.org';
+----
+true	true
+
+# Note: timestamp[:8] doesn't work because timestamp is TIMESTAMP type, not VARCHAR
+# If needed, use cast(timestamp as varchar)[:8] or the year/month virtual columns

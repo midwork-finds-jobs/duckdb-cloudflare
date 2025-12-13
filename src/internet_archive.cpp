@@ -1,4 +1,5 @@
 #include "web_archive_cdx_utils.hpp"
+#include <algorithm>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -14,7 +15,10 @@
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_top_n.hpp"
 #include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 
 namespace duckdb {
 
@@ -41,7 +45,7 @@ struct WaybackMachineBindData : public TableFunctionData {
 	string from_date;                                       // YYYYMMDDhhmmss
 	string to_date;                                         // YYYYMMDDhhmmss
 	idx_t max_results;                                      // Default limit
-	string collapse;                                        // collapse parameter (e.g., "urlkey", "timestamp:8")
+	vector<string> collapses;                               // collapse parameters (e.g., ["digest", "statuscode"])
 	string cdx_url;                                         // The constructed CDX API URL (populated after query)
 	bool fast_latest;                                       // Use fastLatest=true for efficient ORDER BY timestamp DESC
 	bool order_desc;                                        // ORDER BY timestamp DESC detected
@@ -52,8 +56,7 @@ struct WaybackMachineBindData : public TableFunctionData {
 
 	WaybackMachineBindData()
 	    : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100),
-	      collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0), debug(false),
-	      timeout_seconds(180) {
+	      cdx_url(""), fast_latest(false), order_desc(false), offset(0), debug(false), timeout_seconds(180) {
 	}
 };
 
@@ -79,7 +82,7 @@ struct WaybackMachineGlobalState : public GlobalTableFunctionState {
 static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &match_type,
                                     const vector<string> &fields_needed, const vector<string> &cdx_filters,
                                     const string &from_date, const string &to_date, idx_t max_results,
-                                    const string &collapse, bool fast_latest, idx_t offset) {
+                                    const vector<string> &collapses, bool fast_latest, idx_t offset) {
 	// Construct field list for &fl= parameter from fields_needed
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
 
@@ -127,8 +130,8 @@ static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &mat
 		cdx_url += "&filter=" + filter;
 	}
 
-	// Add collapse parameter if specified
-	if (!collapse.empty()) {
+	// Add collapse parameters if specified (CDX API supports multiple)
+	for (const auto &collapse : collapses) {
 		cdx_url += "&collapse=" + collapse;
 	}
 
@@ -143,14 +146,15 @@ static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &mat
 static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const string &url_pattern,
                                                    const string &match_type, const vector<string> &fields_needed,
                                                    const vector<string> &cdx_filters, const string &from_date,
-                                                   const string &to_date, idx_t max_results, const string &collapse,
-                                                   bool fast_latest, idx_t offset, string &out_cdx_url) {
+                                                   const string &to_date, idx_t max_results,
+                                                   const vector<string> &collapses, bool fast_latest, idx_t offset,
+                                                   string &out_cdx_url) {
 	DUCKDB_LOG_DEBUG(context, "QueryArchiveOrgCDX started +%.0fms", ElapsedMs());
 	vector<ArchiveOrgRecord> records;
 
 	// Build the CDX URL
 	string cdx_url = BuildArchiveOrgCDXUrl(url_pattern, match_type, fields_needed, cdx_filters, from_date, to_date,
-	                                       max_results, collapse, fast_latest, offset);
+	                                       max_results, collapses, fast_latest, offset);
 
 	// Construct field list for parsing (same logic as BuildArchiveOrgCDXUrl)
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
@@ -369,8 +373,8 @@ static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, Table
 			if (kv.second.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("wayback_machine collapse parameter must be a string");
 			}
-			bind_data->collapse = kv.second.GetValue<string>();
-			DUCKDB_LOG_DEBUG(context, "CDX API collapse set to: %s", bind_data->collapse.c_str());
+			bind_data->collapses.push_back(kv.second.GetValue<string>());
+			DUCKDB_LOG_DEBUG(context, "CDX API collapse added: %s", bind_data->collapses.back().c_str());
 		} else if (kv.first == "debug") {
 			if (kv.second.type().id() != LogicalTypeId::BOOLEAN) {
 				throw BinderException("wayback_machine debug parameter must be a boolean");
@@ -503,21 +507,25 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 	// Check if only cdx_url is selected (debug mode, fields_needed is empty and no response)
 	bind_data.cdx_url_only = bind_data.debug && bind_data.fields_needed.empty() && !bind_data.fetch_response;
 
-	// Enhanced check: if collapse is set and all needed fields are covered by collapse base, skip fetch
+	// Enhanced check: if collapse is set and all needed fields are covered by collapse bases, skip fetch
 	// This enables testing DISTINCT ON collapse optimization without network requests
-	if (!bind_data.cdx_url_only && bind_data.debug && !bind_data.collapse.empty() && !bind_data.fetch_response) {
-		// Parse collapse base field (e.g., "timestamp:4" -> "timestamp")
-		std::string collapse_base = bind_data.collapse;
-		auto colon_pos = collapse_base.find(':');
-		if (colon_pos != std::string::npos) {
-			collapse_base = collapse_base.substr(0, colon_pos);
+	if (!bind_data.cdx_url_only && bind_data.debug && !bind_data.collapses.empty() && !bind_data.fetch_response) {
+		// Build set of collapse base fields (e.g., "timestamp:4" -> "timestamp")
+		std::set<string> collapse_bases;
+		for (const auto &collapse : bind_data.collapses) {
+			std::string collapse_base = collapse;
+			auto colon_pos = collapse_base.find(':');
+			if (colon_pos != std::string::npos) {
+				collapse_base = collapse_base.substr(0, colon_pos);
+			}
+			collapse_bases.insert(collapse_base);
 		}
 
-		// Check if all fields_needed are derived from collapse base
+		// Check if all fields_needed are derived from collapse bases
 		bool all_covered = true;
 		for (const auto &field : bind_data.fields_needed) {
-			// timestamp collapse covers timestamp field (used for year/month)
-			if (collapse_base == "timestamp" && field == "timestamp") {
+			// Check if this field is covered by any collapse base
+			if (collapse_bases.count(field) > 0) {
 				continue;
 			}
 			// Other fields not covered
@@ -526,8 +534,8 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 		}
 
 		if (all_covered) {
-			DUCKDB_LOG_DEBUG(context, "All fields covered by collapse=%s - skipping network request",
-			                 bind_data.collapse.c_str());
+			DUCKDB_LOG_DEBUG(context, "All fields covered by %zu collapse params - skipping network request",
+			                 bind_data.collapses.size());
 			bind_data.cdx_url_only = true;
 		}
 	}
@@ -538,7 +546,7 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 		bind_data.cdx_url =
 		    BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type, bind_data.fields_needed,
 		                          bind_data.cdx_filters, bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                          bind_data.collapse, bind_data.fast_latest, bind_data.offset);
+		                          bind_data.collapses, bind_data.fast_latest, bind_data.offset);
 		DUCKDB_LOG_DEBUG(context, "CDX URL +%.0fms: %s", ElapsedMs(), bind_data.cdx_url.c_str());
 
 		// Create a single dummy record so we return one row with the cdx_url
@@ -550,7 +558,7 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 		state->records =
 		    QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type, bind_data.fields_needed,
 		                       bind_data.cdx_filters, bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                       bind_data.collapse, bind_data.fast_latest, bind_data.offset, bind_data.cdx_url);
+		                       bind_data.collapses, bind_data.fast_latest, bind_data.offset, bind_data.cdx_url);
 	}
 
 	DUCKDB_LOG_DEBUG(context, "QueryArchiveOrgCDX returned %lu records +%.0fms", (unsigned long)state->records.size(),
@@ -1429,23 +1437,234 @@ static const std::unordered_map<string, string> COLLAPSE_COLUMNS = {
     {"digest", "digest"}, {"timestamp", "timestamp"}, {"length", "length"},    {"statuscode", "statuscode"},
     {"urlkey", "urlkey"}, {"url", "original"},        {"mimetype", "mimetype"}};
 
-// Helper to find all distinct target column names
-static std::set<string> GetDistinctOnColumnNames(const LogicalDistinct &distinct, const LogicalGet &get) {
-	std::set<string> result;
+// Struct to hold collapse info: column name + optional prefix length
+struct CollapseTarget {
+	string column_name;
+	int prefix_length; // 0 means full column, >0 means prefix
+	CollapseTarget() : prefix_length(0) {
+	}
+	CollapseTarget(string name, int prefix = 0) : column_name(std::move(name)), prefix_length(prefix) {
+	}
+};
+
+// Helper to extract column name from a column reference expression
+static string GetColumnNameFromRef(const BoundColumnRefExpression &col_ref, const LogicalGet &get) {
+	auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
+	auto &column_ids = get.GetColumnIds();
+	idx_t binding_col = col_ref.binding.column_index;
+
+	// First try: Use the expression's alias if it matches a known column
+	if (!col_ref.alias.empty()) {
+		for (const auto &col_name : bind_data.column_names) {
+			if (col_name == col_ref.alias) {
+				return col_name;
+			}
+		}
+	}
+
+	// Second try: column_index as position in column_ids (most common in projections)
+	if (binding_col < column_ids.size()) {
+		idx_t orig_col_idx = column_ids[binding_col].GetPrimaryIndex();
+		if (orig_col_idx < bind_data.column_names.size()) {
+			return bind_data.column_names[orig_col_idx];
+		}
+	}
+
+	// Third try: look up by GetName() which includes the column name
+	// This handles virtual/computed columns like 'year' and 'month'
+	string ref_name = col_ref.GetName();
+	for (const auto &col_name : bind_data.column_names) {
+		if (col_name == ref_name) {
+			return col_name;
+		}
+	}
+
+	// Fourth try: column_index as original column index directly
+	if (binding_col < bind_data.column_names.size()) {
+		return bind_data.column_names[binding_col];
+	}
+
+	return "";
+}
+
+// Helper to extract integer value from expression (handles CAST and direct constants)
+static bool TryGetIntegerValue(const Expression &expr, int64_t &out_value) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		auto &constant = expr.Cast<BoundConstantExpression>();
+		if (constant.value.type().IsIntegral() && !constant.value.IsNull()) {
+			out_value = constant.value.GetValue<int64_t>();
+			return true;
+		}
+	} else if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		// Handle CAST(N AS BIGINT) etc.
+		auto &cast_expr = expr.Cast<BoundCastExpression>();
+		return TryGetIntegerValue(*cast_expr.child, out_value);
+	}
+	return false;
+}
+
+// Helper to analyze an expression and extract collapse target info
+// Returns empty CollapseTarget (empty column_name) if not a valid collapse expression
+static CollapseTarget AnalyzeCollapseExpression(const Expression &expr, const LogicalGet &get) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		// Simple column reference
+		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+		string col_name = GetColumnNameFromRef(col_ref, get);
+		if (!col_name.empty()) {
+			return CollapseTarget(col_name, 0);
+		}
+	} else if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+
+		// Handle array_slice (used for urlkey[:6] and urlkey[1:6] syntax)
+		if (func.function.name == "array_slice" && func.children.size() >= 3) {
+			if (func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				string col_name = GetColumnNameFromRef(col_ref, get);
+
+				// Second arg: either empty list [] (for [:N]) or 1 (for [1:N])
+				bool starts_at_beginning = false;
+				if (func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &start_const = func.children[1]->Cast<BoundConstantExpression>();
+					auto type_id = start_const.value.type().id();
+					// Check for empty list (urlkey[:6] case) - type is LIST and value is empty
+					if (type_id == LogicalTypeId::LIST) {
+						// Empty list means from start
+						starts_at_beginning = true;
+					} else if (start_const.value.type().IsIntegral()) {
+						int64_t start_val = start_const.value.GetValue<int64_t>();
+						starts_at_beginning = (start_val == 1);
+					}
+				}
+				// Also handle case where second arg might be NULL (another representation of "from start")
+				if (!starts_at_beginning && func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &start_const = func.children[1]->Cast<BoundConstantExpression>();
+					if (start_const.value.IsNull()) {
+						starts_at_beginning = true;
+					}
+				}
+
+				// Third arg is end position (which equals prefix length for CDX)
+				if (starts_at_beginning) {
+					int64_t prefix_len = 0;
+					if (TryGetIntegerValue(*func.children[2], prefix_len)) {
+						if (!col_name.empty() && prefix_len > 0) {
+							return CollapseTarget(col_name, static_cast<int>(prefix_len));
+						}
+					}
+				}
+			}
+		}
+		// Handle substr/substring(col, 1, N)
+		else if ((func.function.name == "substr" || func.function.name == "substring") && func.children.size() >= 3) {
+			if (func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				string col_name = GetColumnNameFromRef(col_ref, get);
+
+				int64_t start_val = 0;
+				bool starts_at_one = TryGetIntegerValue(*func.children[1], start_val) && start_val == 1;
+
+				if (starts_at_one) {
+					int64_t prefix_len = 0;
+					if (TryGetIntegerValue(*func.children[2], prefix_len) && !col_name.empty() && prefix_len > 0) {
+						return CollapseTarget(col_name, static_cast<int>(prefix_len));
+					}
+				}
+			}
+		}
+	}
+	return CollapseTarget(); // Empty target indicates not found
+}
+
+// Helper to resolve an expression through a chain of projections
+// Returns the final expression after following all BOUND_REF chains
+static const Expression *ResolveExpressionThroughProjections(const Expression &expr,
+                                                             const vector<const LogicalProjection *> &projections) {
+	const Expression *current = &expr;
+
+	// Follow BOUND_REF chain through projections (from top to bottom)
+	for (size_t i = 0; i < projections.size(); i++) {
+		const auto *proj = projections[i];
+		if (current->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+			break;
+		}
+		auto &ref = current->Cast<BoundReferenceExpression>();
+		if (ref.index >= proj->expressions.size()) {
+			return nullptr; // Invalid reference
+		}
+		current = proj->expressions[ref.index].get();
+	}
+	return current;
+}
+
+// Helper to find all distinct target columns with optional prefix lengths
+static vector<CollapseTarget> GetDistinctOnTargets(const LogicalDistinct &distinct, const LogicalGet &get,
+                                                   const vector<const LogicalProjection *> &projections) {
+	vector<CollapseTarget> result;
 	auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 	auto &column_ids = get.GetColumnIds();
 
 	for (const auto &target : distinct.distinct_targets) {
-		if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-			auto &col_ref = target->Cast<BoundColumnRefExpression>();
-			idx_t binding_col = col_ref.binding.column_index;
+		// First try to analyze the target directly (it might be the array_slice itself)
+		auto direct_target = AnalyzeCollapseExpression(*target, get);
+		if (!direct_target.column_name.empty() && direct_target.prefix_length > 0) {
+			// Found a prefix expression directly in the target
+			result.push_back(direct_target);
+			continue;
+		}
 
-			// Try mapping binding directly to column_ids position
-			if (binding_col < column_ids.size()) {
-				idx_t orig_col_idx = column_ids[binding_col].GetPrimaryIndex();
-				if (orig_col_idx < bind_data.column_names.size()) {
-					result.insert(bind_data.column_names[orig_col_idx]);
+		// If direct_target found a column but it looks wrong (it's a different table's column),
+		// try resolving through projections to find the actual column
+		bool use_direct_target = true;
+		if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF && !projections.empty()) {
+			auto &col_ref = target->Cast<BoundColumnRefExpression>();
+			idx_t col_idx = col_ref.binding.column_index;
+
+			// Try to look up the expression in the projection chain
+			// The binding column_index points to an expression in a projection
+			for (auto *proj : projections) {
+				if (col_idx < proj->expressions.size()) {
+					auto &proj_expr = proj->expressions[col_idx];
+					// Check if this projection expression has an alias matching our columns
+					if (!proj_expr->alias.empty()) {
+						for (const auto &known_col : bind_data.column_names) {
+							if (proj_expr->alias == known_col) {
+								result.emplace_back(known_col, 0);
+								use_direct_target = false;
+								break;
+							}
+						}
+					}
+					// Also check if it's a function expression for prefix collapse
+					if (use_direct_target && proj_expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+						auto &func = proj_expr->Cast<BoundFunctionExpression>();
+						if (func.function.name == "array_slice" && func.children.size() >= 3) {
+							auto collapse_target = AnalyzeCollapseExpression(*proj_expr, get);
+							if (!collapse_target.column_name.empty() && collapse_target.prefix_length > 0) {
+								result.push_back(collapse_target);
+								use_direct_target = false;
+							}
+						}
+					}
+					break; // Found in this projection
 				}
+			}
+		}
+
+		// Otherwise resolve through projection chain
+		if (use_direct_target) {
+			const Expression *resolved = ResolveExpressionThroughProjections(*target, projections);
+			if (resolved && resolved != target.get()) {
+				auto collapse_target = AnalyzeCollapseExpression(*resolved, get);
+				if (!collapse_target.column_name.empty()) {
+					result.push_back(collapse_target);
+					continue;
+				}
+			}
+
+			// If still nothing found but we got a column name from direct analysis, use it
+			if (!direct_target.column_name.empty()) {
+				result.push_back(direct_target);
 			}
 		}
 	}
@@ -1458,7 +1677,7 @@ static std::set<string> GetDistinctOnColumnNames(const LogicalDistinct &distinct
 				const string &col_name = bind_data.column_names[orig_idx];
 				// Check if it's a collapsible column or year/month
 				if (COLLAPSE_COLUMNS.count(col_name) || col_name == "year" || col_name == "month") {
-					result.insert(col_name);
+					result.emplace_back(col_name, 0);
 				}
 			}
 		}
@@ -1471,45 +1690,69 @@ static std::set<string> GetDistinctOnColumnNames(const LogicalDistinct &distinct
 	return result;
 }
 
-// Helper to check if a DISTINCT ON targets a collapsible column
-// Returns the CDX API collapse parameter value if found, empty string otherwise
-static string GetDistinctOnCollapseField(const LogicalDistinct &distinct, const LogicalGet &get) {
+// Helper to check if a DISTINCT ON targets collapsible columns
+// Returns the CDX API collapse parameter values if found, empty vector otherwise
+static vector<string> GetDistinctOnCollapseFields(const LogicalDistinct &distinct, const LogicalGet &get,
+                                                  const vector<const LogicalProjection *> &projections) {
+	vector<string> result;
+
 	if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
-		return "";
+		return result;
 	}
 
-	auto distinct_cols = GetDistinctOnColumnNames(distinct, get);
-	if (distinct_cols.empty()) {
-		return "";
+	auto targets = GetDistinctOnTargets(distinct, get, projections);
+	if (targets.empty()) {
+		return result;
+	}
+
+	// Collect column names for year/month handling
+	std::set<string> col_names;
+	for (const auto &t : targets) {
+		col_names.insert(t.column_name);
 	}
 
 	// Special handling for year and month columns
 	// timestamp format is YYYYMMDDhhmmss
 	// year = first 4 chars, year+month = first 6 chars
-	bool has_year = distinct_cols.count("year") > 0;
-	bool has_month = distinct_cols.count("month") > 0;
+	bool has_year = col_names.count("year") > 0;
+	bool has_month = col_names.count("month") > 0;
+
+	if (has_month && !has_year) {
+		// DISTINCT ON(month) alone doesn't make sense - month without year context is ambiguous
+		throw BinderException("DISTINCT ON(month) is not supported for wayback_machine(). "
+		                      "Use DISTINCT ON(year, month) or DISTINCT ON(year) instead.");
+	}
 
 	if (has_year && has_month) {
 		// DISTINCT ON(year, month) -> collapse on first 6 chars of timestamp
-		return "timestamp:6";
+		result.push_back("timestamp:6");
+		// Remove year/month from targets so we don't process them again
+		col_names.erase("year");
+		col_names.erase("month");
 	} else if (has_year) {
 		// DISTINCT ON(year) -> collapse on first 4 chars of timestamp
-		return "timestamp:4";
-	} else if (has_month) {
-		// DISTINCT ON(month) alone -> collapse on first 6 chars (year+month)
-		// (month alone doesn't make sense without year context)
-		return "timestamp:6";
+		result.push_back("timestamp:4");
+		col_names.erase("year");
 	}
 
-	// Check for regular collapsible columns
-	for (const auto &col_name : distinct_cols) {
-		auto it = COLLAPSE_COLUMNS.find(col_name);
+	// Check for regular collapsible columns (with optional prefix)
+	for (const auto &target : targets) {
+		// Skip year/month if already handled above
+		if (target.column_name == "year" || target.column_name == "month") {
+			continue;
+		}
+		auto it = COLLAPSE_COLUMNS.find(target.column_name);
 		if (it != COLLAPSE_COLUMNS.end()) {
-			return it->second;
+			if (target.prefix_length > 0) {
+				// Prefix collapse: urlkey:6
+				result.push_back(it->second + ":" + to_string(target.prefix_length));
+			} else {
+				result.push_back(it->second);
+			}
 		}
 	}
 
-	return "";
+	return result;
 }
 
 // Optimizer function to push down DISTINCT ON to collapse parameter
@@ -1526,10 +1769,26 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
-		// Find the GET node first (skip projections, filters)
+		// Find the GET node and collect all projections (skip filters, aggregates, etc.)
 		reference<LogicalOperator> child = *op->children[0];
-		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION ||
-		       child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
+		vector<const LogicalProjection *> projections;
+		while (true) {
+			if (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+				projections.push_back(&child.get().Cast<LogicalProjection>());
+			} else if (child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
+				// Skip filter
+			} else if (child.get().type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				// DISTINCT ON uses aggregate - continue traversing
+			} else if (child.get().type == LogicalOperatorType::LOGICAL_EXPRESSION_GET) {
+				// Expression get (used for subqueries, VALUES, etc.) - not our table function
+				break;
+			} else if (child.get().type == LogicalOperatorType::LOGICAL_GET) {
+				// Found it
+				break;
+			}
+			if (child.get().children.empty()) {
+				break;
+			}
 			child = *child.get().children[0];
 		}
 
@@ -1548,19 +1807,23 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
-		// Check if DISTINCT ON targets a collapsible column
-		string collapse_field = GetDistinctOnCollapseField(distinct, get);
-		if (collapse_field.empty()) {
+		// Check if DISTINCT ON targets collapsible columns
+		vector<string> collapse_fields = GetDistinctOnCollapseFields(distinct, get, projections);
+		if (collapse_fields.empty()) {
 			for (auto &c : op->children) {
 				OptimizeWaybackMachineDistinctOnPushdown(c);
 			}
 			return;
 		}
 
-		// Found DISTINCT ON over wayback_machine with collapsible column!
+		// Found DISTINCT ON over wayback_machine with collapsible column(s)!
 		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
-		if (bind_data.collapse.empty()) {
-			bind_data.collapse = collapse_field;
+		// Add all collapse fields to the vector
+		for (const auto &field : collapse_fields) {
+			// Avoid duplicates
+			if (std::find(bind_data.collapses.begin(), bind_data.collapses.end(), field) == bind_data.collapses.end()) {
+				bind_data.collapses.push_back(field);
+			}
 		}
 
 		// Recurse into children
