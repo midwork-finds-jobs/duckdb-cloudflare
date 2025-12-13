@@ -37,12 +37,27 @@ string LikeToRegex(const string &like_pattern) {
 
 	for (size_t i = 0; i < like_pattern.size(); i++) {
 		char c = like_pattern[i];
+
+		// Handle escape sequences in LIKE pattern (backslash escapes next char)
+		if (c == '\\' && i + 1 < like_pattern.size()) {
+			char next = like_pattern[i + 1];
+			// Escaped char is literal - escape it for regex if needed
+			if (next == '.' || next == '(' || next == ')' || next == '[' || next == ']' || next == '{' || next == '}' ||
+			    next == '+' || next == '?' || next == '^' || next == '$' || next == '|' || next == '\\' ||
+			    next == '*') {
+				regex += '\\';
+			}
+			regex += next;
+			i++; // Skip the escaped character
+			continue;
+		}
+
 		if (c == '%') {
 			regex += ".*";
 		} else if (c == '_') {
 			regex += ".";
 		} else if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '+' ||
-		           c == '?' || c == '^' || c == '$' || c == '|' || c == '\\') {
+		           c == '?' || c == '^' || c == '$' || c == '|') {
 			// Escape regex special chars
 			regex += '\\';
 			regex += c;
