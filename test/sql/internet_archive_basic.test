@@ -221,3 +221,25 @@ true	true
 
 # Note: timestamp[:8] doesn't work because timestamp is TIMESTAMP type, not VARCHAR
 # If needed, use cast(timestamp as varchar)[:8] or the year/month virtual columns
+
+# Test year filter pushdown: year >= 2020 should add &from=2020
+query I
+SELECT cdx_url LIKE '%&from=2020%' AS has_from_2020
+FROM (SELECT cdx_url FROM wayback_machine(debug := true) WHERE url = 'archive.org' AND year >= 2020);
+----
+true
+
+# Test year filter pushdown: year <= 2024 should add &to=2024
+query I
+SELECT cdx_url LIKE '%&to=2024%' AS has_to_2024
+FROM (SELECT cdx_url FROM wayback_machine(debug := true) WHERE url = 'archive.org' AND year <= 2024);
+----
+true
+
+# Test year filter pushdown: year = 2024 should add both &from=2024 and &to=2024
+query II
+SELECT cdx_url LIKE '%&from=2024%' AS has_from_2024,
+       cdx_url LIKE '%&to=2024%' AS has_to_2024
+FROM (SELECT cdx_url FROM wayback_machine(debug := true) WHERE url = 'archive.org' AND year = 2024);
+----
+true	true

@@ -1256,6 +1256,46 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				filters_to_remove.push_back(i);
 			}
 		}
+		// Handle year filtering (converts to from/to date range)
+		// year >= 2020 -> from=2020, year <= 2024 -> to=2024
+		else if (column_name == "year" && (constant.value.type().id() == LogicalTypeId::INTEGER ||
+		                                   constant.value.type().id() == LogicalTypeId::BIGINT)) {
+			int32_t year_val = constant.value.GetValue<int32_t>();
+			string year_str = to_string(year_val);
+
+			if (filter->type == ExpressionType::COMPARE_GREATERTHAN) {
+				// year > 2020 means from 2021
+				bind_data.from_date = to_string(year_val + 1);
+				DUCKDB_LOG_DEBUG(context, "Year > %d -> from=%s +%.0fms", year_val, bind_data.from_date.c_str(),
+				                 ElapsedMs());
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+				// year >= 2020 means from 2020
+				bind_data.from_date = year_str;
+				DUCKDB_LOG_DEBUG(context, "Year >= %d -> from=%s +%.0fms", year_val, bind_data.from_date.c_str(),
+				                 ElapsedMs());
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_LESSTHAN) {
+				// year < 2024 means to 2023 (CDX uses prefix matching)
+				bind_data.to_date = to_string(year_val - 1);
+				DUCKDB_LOG_DEBUG(context, "Year < %d -> to=%s +%.0fms", year_val, bind_data.to_date.c_str(),
+				                 ElapsedMs());
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+				// year <= 2024 means to 2024 (CDX uses prefix matching, includes all of 2024)
+				bind_data.to_date = year_str;
+				DUCKDB_LOG_DEBUG(context, "Year <= %d -> to=%s +%.0fms", year_val, bind_data.to_date.c_str(),
+				                 ElapsedMs());
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_EQUAL) {
+				// year = 2024 means from 2024 to 2024 (CDX uses prefix matching)
+				bind_data.from_date = year_str;
+				bind_data.to_date = year_str;
+				DUCKDB_LOG_DEBUG(context, "Year = %d -> from=%s to=%s +%.0fms", year_val, bind_data.from_date.c_str(),
+				                 bind_data.to_date.c_str(), ElapsedMs());
+				filters_to_remove.push_back(i);
+			}
+		}
 	}
 
 	// Remove pushed down filters
