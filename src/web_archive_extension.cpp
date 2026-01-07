@@ -2,6 +2,7 @@
 
 #include "web_archive_extension.hpp"
 #include "web_archive_utils.hpp"
+#include "d1_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 
@@ -15,11 +16,12 @@ void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op);
 void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op);
 void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op);
 
-// Combined optimizer for both table functions
+// Combined optimizer for all table functions
 void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	OptimizeCommonCrawlLimitPushdown(plan);
 	OptimizeWaybackMachineLimitPushdown(plan);
 	OptimizeWaybackMachineDistinctOnPushdown(plan);
+	OptimizeD1ScanLimitPushdown(plan);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -32,6 +34,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register the wayback_machine table function
 	RegisterWaybackMachineFunction(loader);
+
+	// Register Cloudflare D1 functions
+	RegisterD1QueryFunction(loader);
+	RegisterD1DatabasesFunction(loader);
+	RegisterD1TablesFunction(loader);
+	RegisterD1ExecuteFunction(loader);
+
+	// Register D1 secret type for CREATE SECRET TYPE D1
+	RegisterD1SecretType(loader);
+
+	// Register D1 attach/detach functions
+	RegisterD1AttachFunction(loader);
+	RegisterD1DetachFunction(loader);
+	RegisterD1ScanFunction(loader);
+	RegisterD1AttachViewsFunction(loader);
+
+	// Register replacement scan for attached D1 databases
+	RegisterD1ReplacementScan(loader.GetDatabaseInstance());
 
 	// Register optimizer extension for LIMIT pushdown
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());

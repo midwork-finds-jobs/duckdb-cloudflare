@@ -31,6 +31,7 @@
     # Build dependencies for web_archive_cdx extension
     zlib
     openssl
+    curl
   ];
 
   # https://devenv.sh/languages/
