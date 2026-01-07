@@ -44,14 +44,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register D1 secret type for CREATE SECRET TYPE D1
 	RegisterD1SecretType(loader);
 
-	// Register D1 attach/detach functions
+	// Register D1 attach and scan functions
 	RegisterD1AttachFunction(loader);
-	RegisterD1DetachFunction(loader);
 	RegisterD1ScanFunction(loader);
-	RegisterD1AttachViewsFunction(loader);
-
-	// Register replacement scan for attached D1 databases
-	RegisterD1ReplacementScan(loader.GetDatabaseInstance());
 
 	// Register optimizer extension for LIMIT pushdown
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());

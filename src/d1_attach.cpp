@@ -20,257 +20,105 @@
 namespace duckdb {
 
 // ========================================
-// D1 ATTACHED DATABASE REGISTRY
+// D1_ATTACH TABLE FUNCTION
+// Creates views for all tables in D1 database
 // ========================================
 
-// Global registry of attached D1 databases
-struct D1AttachedDatabase {
-	string secret_name;
-	string database_name; // Human-readable name
-	string database_id;   // UUID
-	D1Config config;
-	vector<D1TableInfo> tables;
-};
-
-static std::mutex g_d1_registry_mutex;
-static std::unordered_map<string, D1AttachedDatabase> g_d1_attached_databases;
-
-// ========================================
-// D1_ATTACH FUNCTION
-// ========================================
-
-struct D1AttachBindData : public FunctionData {
-	string alias;
+struct D1AttachBindData : public TableFunctionData {
+	bool finished = false;
+	bool overwrite = false;
+	string database_input; // Name or UUID
 	string secret_name;
 	string database_name;
 	string database_id;
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto result = make_uniq<D1AttachBindData>();
-		result->alias = alias;
-		result->secret_name = secret_name;
-		result->database_name = database_name;
-		result->database_id = database_id;
-		return std::move(result);
-	}
-
-	bool Equals(const FunctionData &other) const override {
-		auto &o = other.Cast<D1AttachBindData>();
-		return alias == o.alias && secret_name == o.secret_name && database_name == o.database_name;
-	}
 };
 
 static unique_ptr<FunctionData> D1AttachBind(ClientContext &context, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, vector<string> &names) {
-	auto bind_data = make_uniq<D1AttachBindData>();
+	auto result = make_uniq<D1AttachBindData>();
 
-	// Parse input: d1_attach('database_name_or_id', 'secret_name', 'alias')
-	if (input.inputs.size() < 2) {
-		throw BinderException("d1_attach requires: database_name_or_id, secret_name [, alias]");
+	// d1_attach('database_name_or_id', secret := 'secret_name', overwrite := true)
+	if (input.inputs.empty()) {
+		throw BinderException("d1_attach requires: database_name_or_id");
 	}
 
-	string db_input = input.inputs[0].GetValue<string>();
-	bind_data->secret_name = input.inputs[1].GetValue<string>();
+	result->database_input = input.inputs[0].GetValue<string>();
 
-	if (input.inputs.size() >= 3) {
-		bind_data->alias = input.inputs[2].GetValue<string>();
-	} else {
-		// Use database name as alias (extract from db_input if it looks like a UUID)
-		bind_data->alias = db_input;
+	// Check named parameters
+	for (auto &kv : input.named_parameters) {
+		if (kv.first == "secret") {
+			result->secret_name = StringValue::Get(kv.second);
+		} else if (kv.first == "overwrite") {
+			result->overwrite = BooleanValue::Get(kv.second);
+		}
+	}
+
+	if (result->secret_name.empty()) {
+		throw BinderException("d1_attach requires 'secret' parameter (e.g., secret := 'my_secret')");
 	}
 
 	// Get D1 config from secret
-	D1Config config = GetD1ConfigFromSecret(context, bind_data->secret_name);
+	D1Config config = GetD1ConfigFromSecret(context, result->secret_name);
 
 	// Determine if input is UUID or name
-	bool is_uuid = (db_input.size() == 36 && db_input[8] == '-' && db_input[13] == '-');
+	bool is_uuid =
+	    (result->database_input.size() == 36 && result->database_input[8] == '-' && result->database_input[13] == '-');
 
 	if (is_uuid) {
-		bind_data->database_id = db_input;
+		result->database_id = result->database_input;
 		// Try to get name from list
 		auto databases = D1ListDatabases(config);
 		for (const auto &db : databases) {
-			if (db.uuid == db_input) {
-				bind_data->database_name = db.name;
+			if (db.uuid == result->database_input) {
+				result->database_name = db.name;
 				break;
 			}
 		}
-		if (bind_data->database_name.empty()) {
-			bind_data->database_name = db_input;
+		if (result->database_name.empty()) {
+			result->database_name = result->database_input;
 		}
 	} else {
-		bind_data->database_name = db_input;
-		bind_data->database_id = D1GetDatabaseIdByName(config, db_input);
+		result->database_name = result->database_input;
+		result->database_id = D1GetDatabaseIdByName(config, result->database_input);
 	}
 
-	// Update alias if it was defaulted to UUID
-	if (bind_data->alias == bind_data->database_id && !bind_data->database_name.empty()) {
-		bind_data->alias = bind_data->database_name;
-	}
-
-	// Store config for later
-	config.database_id = bind_data->database_id;
-	config.database_name = bind_data->database_name;
-
-	// Fetch table list
-	vector<D1TableInfo> tables = D1GetTables(config);
-
-	// Register in global registry
-	{
-		std::lock_guard<std::mutex> lock(g_d1_registry_mutex);
-
-		D1AttachedDatabase attached;
-		attached.secret_name = bind_data->secret_name;
-		attached.database_name = bind_data->database_name;
-		attached.database_id = bind_data->database_id;
-		attached.config = config;
-		attached.tables = std::move(tables);
-
-		g_d1_attached_databases[bind_data->alias] = std::move(attached);
-	}
-
-	// Return schema (success message)
-	names = {"database", "alias", "tables"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER};
-
-	return std::move(bind_data);
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("Success");
+	return std::move(result);
 }
 
-struct D1AttachGlobalState : public GlobalTableFunctionState {
-	bool done = false;
-	idx_t MaxThreads() const override {
-		return 1;
-	}
-};
-
-static unique_ptr<GlobalTableFunctionState> D1AttachInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	return make_uniq<D1AttachGlobalState>();
-}
-
-static void D1AttachFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<D1AttachGlobalState>();
-	if (state.done) {
-		output.SetCardinality(0);
+static void D1AttachFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.bind_data->CastNoConst<D1AttachBindData>();
+	if (data.finished) {
 		return;
 	}
 
-	auto &bind_data = data.bind_data->Cast<D1AttachBindData>();
+	// Get D1 config and list tables
+	D1Config config = GetD1ConfigFromSecret(context, data.secret_name);
+	config.database_id = data.database_id;
 
-	// Get table count from registry
-	int table_count = 0;
-	{
-		std::lock_guard<std::mutex> lock(g_d1_registry_mutex);
-		auto it = g_d1_attached_databases.find(bind_data.alias);
-		if (it != g_d1_attached_databases.end()) {
-			table_count = static_cast<int>(it->second.tables.size());
-		}
+	auto tables = D1GetTables(config);
+	auto dconn = Connection(context.db->GetDatabase(context));
+
+	// Create view for each table using TableFunction()->CreateView() pattern
+	for (auto &table : tables) {
+		dconn.TableFunction("d1_scan", {Value(table.name), Value(data.secret_name), Value(data.database_id)})
+		    ->CreateView(table.name, data.overwrite, false);
 	}
 
-	output.SetValue(0, 0, Value(bind_data.database_name));
-	output.SetValue(1, 0, Value(bind_data.alias));
-	output.SetValue(2, 0, Value::INTEGER(table_count));
-	output.SetCardinality(1);
-
-	state.done = true;
+	data.finished = true;
 }
 
 void RegisterD1AttachFunction(ExtensionLoader &loader) {
-	TableFunction func("d1_attach", {LogicalType::VARCHAR, LogicalType::VARCHAR}, D1AttachFunction, D1AttachBind,
-	                   D1AttachInitGlobal);
-	func.varargs = LogicalType::VARCHAR; // Optional alias as 3rd arg
-
+	TableFunction func("d1_attach", {LogicalType::VARCHAR}, D1AttachFunction, D1AttachBind);
+	func.named_parameters["secret"] = LogicalType::VARCHAR;
+	func.named_parameters["overwrite"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(func);
-}
-
-// ========================================
-// D1_DETACH FUNCTION
-// ========================================
-
-static void D1DetachScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &alias_vector = args.data[0];
-
-	UnaryExecutor::Execute<string_t, bool>(alias_vector, result, args.size(), [&](string_t alias) {
-		std::lock_guard<std::mutex> lock(g_d1_registry_mutex);
-		auto it = g_d1_attached_databases.find(alias.GetString());
-		if (it != g_d1_attached_databases.end()) {
-			g_d1_attached_databases.erase(it);
-			return true;
-		}
-		return false;
-	});
-}
-
-void RegisterD1DetachFunction(ExtensionLoader &loader) {
-	ScalarFunction func("d1_detach", {LogicalType::VARCHAR}, LogicalType::BOOLEAN, D1DetachScalarFunction);
-	loader.RegisterFunction(func);
-}
-
-// ========================================
-// REPLACEMENT SCAN FOR D1 TABLES
-// ========================================
-
-// Check if a table reference matches an attached D1 database
-static unique_ptr<TableRef> D1ReplacementScan(ClientContext &context, ReplacementScanInput &input,
-                                              optional_ptr<ReplacementScanData> data) {
-	// Parse table name - could be "alias.table" or just "table"
-	string table_name = input.table_name;
-	string db_alias;
-
-	// Check for qualified name (alias.table)
-	size_t dot_pos = table_name.find('.');
-	if (dot_pos != string::npos) {
-		db_alias = table_name.substr(0, dot_pos);
-		table_name = table_name.substr(dot_pos + 1);
-	}
-
-	// Look up in registry
-	std::lock_guard<std::mutex> lock(g_d1_registry_mutex);
-
-	D1AttachedDatabase *attached = nullptr;
-
-	if (!db_alias.empty()) {
-		// Qualified name - look up specific alias
-		auto it = g_d1_attached_databases.find(db_alias);
-		if (it == g_d1_attached_databases.end()) {
-			return nullptr;
-		}
-		attached = &it->second;
-	} else {
-		// Unqualified name - this could match any attached database
-		// For now, we don't do unqualified replacement (user must use alias.table)
-		return nullptr;
-	}
-
-	// Check if table exists in this database
-	bool table_found = false;
-	for (const auto &t : attached->tables) {
-		if (t.name == table_name) {
-			table_found = true;
-			break;
-		}
-	}
-
-	if (!table_found) {
-		return nullptr;
-	}
-
-	// Create a table function reference to d1_scan
-	auto table_function = make_uniq<TableFunctionRef>();
-	vector<unique_ptr<ParsedExpression>> children;
-
-	// d1_scan(table_name, secret, database_id)
-	children.push_back(make_uniq<ConstantExpression>(Value(table_name)));
-	children.push_back(make_uniq<ConstantExpression>(Value(attached->secret_name)));
-	children.push_back(make_uniq<ConstantExpression>(Value(attached->database_id)));
-
-	table_function->function = make_uniq<FunctionExpression>("d1_scan", std::move(children));
-
-	return std::move(table_function);
 }
 
 // ========================================
 // D1_SCAN TABLE FUNCTION
-// Used by replacement scan
+// Scans a single D1 table with pushdowns
 // ========================================
 
 struct D1ScanBindData : public TableFunctionData {
@@ -573,63 +421,6 @@ void RegisterD1ScanFunction(ExtensionLoader &loader) {
 	func.projection_pushdown = true;
 	func.pushdown_complex_filter = D1ScanPushdownComplexFilter;
 
-	loader.RegisterFunction(func);
-}
-
-// ========================================
-// REGISTER REPLACEMENT SCAN
-// ========================================
-
-void RegisterD1ReplacementScan(DatabaseInstance &db) {
-	auto &config = DBConfig::GetConfig(db);
-	config.replacement_scans.emplace_back(D1ReplacementScan, nullptr);
-}
-
-// ========================================
-// D1_ATTACH_VIEWS FUNCTION
-// Creates views for each table in attached DB
-// ========================================
-
-static void D1AttachViewsScalarFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &context = state.GetContext();
-	auto &alias_vector = args.data[0];
-
-	UnaryExecutor::Execute<string_t, string_t>(alias_vector, result, args.size(), [&](string_t alias_str) {
-		string alias = alias_str.GetString();
-
-		std::lock_guard<std::mutex> lock(g_d1_registry_mutex);
-		auto it = g_d1_attached_databases.find(alias);
-		if (it == g_d1_attached_databases.end()) {
-			throw IOException("D1 database not attached: " + alias);
-		}
-
-		auto &attached = it->second;
-		string created_views;
-
-		for (const auto &table : attached.tables) {
-			// Create view: CREATE OR REPLACE VIEW alias_tablename AS SELECT * FROM d1_scan(...)
-			string view_name = alias + "_" + table.name;
-			string sql = "CREATE OR REPLACE VIEW " + view_name + " AS SELECT * FROM d1_scan('" + table.name + "', '" +
-			             attached.secret_name + "', '" + attached.database_id + "')";
-
-			try {
-				auto conn = Connection(*context.db);
-				conn.Query(sql);
-				if (!created_views.empty()) {
-					created_views += ", ";
-				}
-				created_views += view_name;
-			} catch (std::exception &e) {
-				// Ignore errors for now
-			}
-		}
-
-		return StringVector::AddString(result, created_views);
-	});
-}
-
-void RegisterD1AttachViewsFunction(ExtensionLoader &loader) {
-	ScalarFunction func("d1_attach_views", {LogicalType::VARCHAR}, LogicalType::VARCHAR, D1AttachViewsScalarFunction);
 	loader.RegisterFunction(func);
 }
 

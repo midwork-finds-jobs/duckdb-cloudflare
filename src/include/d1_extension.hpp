@@ -177,20 +177,11 @@ D1Config GetD1ConfigFromSecret(ClientContext &context, const string &secret_name
 // ATTACH SUPPORT
 // ========================================
 
-// Register d1_attach table function
+// Register d1_attach table function (creates views for all tables)
 void RegisterD1AttachFunction(ExtensionLoader &loader);
 
-// Register d1_detach scalar function
-void RegisterD1DetachFunction(ExtensionLoader &loader);
-
-// Register d1_scan table function (used by replacement scan)
+// Register d1_scan table function
 void RegisterD1ScanFunction(ExtensionLoader &loader);
-
-// Register replacement scan for attached D1 databases
-void RegisterD1ReplacementScan(DatabaseInstance &db);
-
-// Register d1_attach_views function
-void RegisterD1AttachViewsFunction(ExtensionLoader &loader);
 
 // Optimizer for LIMIT pushdown
 void OptimizeD1ScanLimitPushdown(unique_ptr<LogicalOperator> &op);
