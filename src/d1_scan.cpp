@@ -1,11 +1,5 @@
 #include "d1_extension.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/parser/expression/constant_expression.hpp"
-#include "duckdb/parser/expression/function_expression.hpp"
-#include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "duckdb/function/replacement_scan.hpp"
-#include "duckdb/main/attached_database.hpp"
-#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -14,107 +8,7 @@
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_top_n.hpp"
 
-#include <mutex>
-#include <unordered_map>
-
 namespace duckdb {
-
-// ========================================
-// D1_ATTACH TABLE FUNCTION
-// Creates views for all tables in D1 database
-// ========================================
-
-struct D1AttachBindData : public TableFunctionData {
-	bool finished = false;
-	bool overwrite = false;
-	string database_input; // Name or UUID
-	string secret_name;
-	string database_name;
-	string database_id;
-};
-
-static unique_ptr<FunctionData> D1AttachBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
-	auto result = make_uniq<D1AttachBindData>();
-
-	// d1_attach('database_name_or_id', secret := 'secret_name', overwrite := true)
-	if (input.inputs.empty()) {
-		throw BinderException("d1_attach requires: database_name_or_id");
-	}
-
-	result->database_input = input.inputs[0].GetValue<string>();
-
-	// Check named parameters
-	for (auto &kv : input.named_parameters) {
-		if (kv.first == "secret") {
-			result->secret_name = StringValue::Get(kv.second);
-		} else if (kv.first == "overwrite") {
-			result->overwrite = BooleanValue::Get(kv.second);
-		}
-	}
-
-	if (result->secret_name.empty()) {
-		throw BinderException("d1_attach requires 'secret' parameter (e.g., secret := 'my_secret')");
-	}
-
-	// Get D1 config from secret
-	D1Config config = GetD1ConfigFromSecret(context, result->secret_name);
-
-	// Determine if input is UUID or name
-	bool is_uuid =
-	    (result->database_input.size() == 36 && result->database_input[8] == '-' && result->database_input[13] == '-');
-
-	if (is_uuid) {
-		result->database_id = result->database_input;
-		// Try to get name from list
-		auto databases = D1ListDatabases(config);
-		for (const auto &db : databases) {
-			if (db.uuid == result->database_input) {
-				result->database_name = db.name;
-				break;
-			}
-		}
-		if (result->database_name.empty()) {
-			result->database_name = result->database_input;
-		}
-	} else {
-		result->database_name = result->database_input;
-		result->database_id = D1GetDatabaseIdByName(config, result->database_input);
-	}
-
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("Success");
-	return std::move(result);
-}
-
-static void D1AttachFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &data = data_p.bind_data->CastNoConst<D1AttachBindData>();
-	if (data.finished) {
-		return;
-	}
-
-	// Get D1 config and list tables
-	D1Config config = GetD1ConfigFromSecret(context, data.secret_name);
-	config.database_id = data.database_id;
-
-	auto tables = D1GetTables(config);
-	auto dconn = Connection(context.db->GetDatabase(context));
-
-	// Create view for each table using TableFunction()->CreateView() pattern
-	for (auto &table : tables) {
-		dconn.TableFunction("d1_scan", {Value(table.name), Value(data.secret_name), Value(data.database_id)})
-		    ->CreateView(table.name, data.overwrite, false);
-	}
-
-	data.finished = true;
-}
-
-void RegisterD1AttachFunction(ExtensionLoader &loader) {
-	TableFunction func("d1_attach", {LogicalType::VARCHAR}, D1AttachFunction, D1AttachBind);
-	func.named_parameters["secret"] = LogicalType::VARCHAR;
-	func.named_parameters["overwrite"] = LogicalType::BOOLEAN;
-	loader.RegisterFunction(func);
-}
 
 // ========================================
 // D1_SCAN TABLE FUNCTION

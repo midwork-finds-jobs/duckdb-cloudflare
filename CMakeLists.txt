@@ -24,7 +24,8 @@ set(EXTENSION_SOURCES
     src/d1_http.cpp
     src/d1_functions.cpp
     src/d1_secret.cpp
-    src/d1_attach.cpp
+    src/d1_storage.cpp
+    src/d1_scan.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

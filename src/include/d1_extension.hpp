@@ -177,8 +177,8 @@ D1Config GetD1ConfigFromSecret(ClientContext &context, const string &secret_name
 // ATTACH SUPPORT
 // ========================================
 
-// Register d1_attach table function (creates views for all tables)
-void RegisterD1AttachFunction(ExtensionLoader &loader);
+// Register D1 storage extension for ATTACH DATABASE syntax
+void RegisterD1StorageExtension(DatabaseInstance &db);
 
 // Register d1_scan table function
 void RegisterD1ScanFunction(ExtensionLoader &loader);
