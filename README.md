@@ -1,313 +1,265 @@
-# duckdb-web-archive-cdx
+# Cloudflare Extension for DuckDB
 
-DuckDB extension to query web archive CDX APIs directly from SQL.
+Query Cloudflare D1 databases directly from DuckDB with native ATTACH DATABASE syntax, transaction batching, and automatic query optimization.
 
-## Features
-
-- **Two data sources**: Wayback Machine (1996-present) and Common Crawl (2008-present)
-- **Smart pushdowns**: `SELECT`, `WHERE`, `LIMIT`, and `DISTINCT ON` are pushed to the CDX API
-- **Minimal requests**: Only fetches what you need - no wasted bandwidth
-- **Response fetching**: Archived page content is fetched only when `response.body` is selected
+[![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.2-blue)](https://duckdb.org)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Community Extension](https://img.shields.io/badge/Community-Extension-orange)](https://duckdb.org/community_extensions/)
 
 ## Installation
 
 ```sql
-INSTALL web_archive FROM community;
-LOAD web_archive;
+INSTALL cloudflare FROM community;
+LOAD cloudflare;
 ```
 
-## Quick Start: Track GitHub Stars Over Time
+## Features
 
-Query the Wayback Machine to see how DuckDB's GitHub stars grew over the years.
+- ✅ **Natural ATTACH syntax** - `ATTACH 'database' AS mydb (TYPE d1)`
+- ✅ **No SECRET parameter needed** - Automatically finds D1 secret
+- ✅ **Auto-create views** - All tables instantly queryable
+- ✅ **Transaction batching** - Multiple operations in single HTTP request
+- ✅ **Query optimization** - Automatic filter/LIMIT/projection pushdown
+- ✅ **Secret management** - Store credentials once with CREATE SECRET
 
-Using the [html_query](https://github.com/midwork-finds-jobs/duckdb_html_query) extension to extract data from archived HTML:
+## Quick Start
+
+### 1. Get Credentials
+
+From [Cloudflare Dashboard](https://dash.cloudflare.com):
+
+- **Account ID**: `D1 → Database → Right sidebar`
+- **API Token**: `Profile → API Tokens → Create Token` (with D1 permissions)
+
+See [detailed guide →](docs/CLOUDFLARE-CREDENTIALS.md)
+
+### 2. Create Secret
 
 ```sql
-SELECT DISTINCT ON(year)
-    url[9:] as url,
-    strftime(timestamp::TIMESTAMP, '%Y-%m-%d') AS date,
-    html_query(response.body, '#repo-stars-counter-star', '@text') AS stars,
-    html_query(response.body, '#repo-network-counter', '@text') AS forks,
-    html_query(response.body, 'a[href="/duckdb/duckdb/releases"] span', '@text') AS releases,
-    html_query(response.body, 'a[href="/duckdb/duckdb/graphs/contributors"] span', '@text') AS contributors
-FROM wayback_machine()
-WHERE url = 'github.com/duckdb/duckdb'
-  AND timestamp > '2018-01-01'
-  AND statuscode = 200
-  AND mimetype = 'text/html'
-ORDER BY date
-LIMIT 10;
+CREATE SECRET d1 (
+    TYPE d1,
+    ACCOUNT_ID 'your-cloudflare-account-id',
+    API_TOKEN 'your-cloudflare-api-token'
+);
 ```
+
+### 3. Query Databases
+
+```sql
+-- List databases
+SELECT * FROM d1_databases('d1');
+
+-- Attach database (no SECRET needed!)
+ATTACH 'my-database' AS mydb (TYPE d1);
+
+-- Query with automatic optimization
+SELECT * FROM mydb.users WHERE active = true LIMIT 10;
+```
+
+### 4. Transaction Batching
+
+Multiple operations → single HTTP request:
+
+```sql
+BEGIN TRANSACTION;
+  INSERT INTO mydb.logs VALUES (1, 'Event A');
+  INSERT INTO mydb.logs VALUES (2, 'Event B');
+  UPDATE mydb.settings SET value = 'new' WHERE key = 'config';
+COMMIT;  -- All 3 statements sent as one batch
+```
+
+## D1 Functions
+
+| Function | Purpose | Example |
+|----------|---------|---------|
+| `d1_databases(secret)` | List all databases | `SELECT * FROM d1_databases('d1')` |
+| `d1_tables(secret, db)` | List tables | `SELECT * FROM d1_tables('d1', 'my-db')` |
+| `d1_query(secret, db, sql)` | Execute query | `SELECT * FROM d1_query('d1', 'my-db', 'SELECT * FROM users')` |
+| `d1_execute(secret, db, sql)` | Execute statement | `SELECT d1_execute('d1', 'my-db', 'INSERT INTO ...')` |
+
+## Advanced Usage
+
+### Multiple Cloudflare Accounts
+
+```sql
+-- Production
+CREATE SECRET prod (TYPE d1, ACCOUNT_ID 'prod-id', API_TOKEN 'prod-token');
+ATTACH 'prod-db' AS prod (TYPE d1, SECRET 'prod');
+
+-- Staging
+CREATE SECRET staging (TYPE d1, ACCOUNT_ID 'staging-id', API_TOKEN 'staging-token');
+ATTACH 'staging-db' AS staging (TYPE d1, SECRET 'staging');
+
+-- Compare environments
+SELECT 'prod' as env, COUNT(*) FROM prod.users
+UNION ALL
+SELECT 'staging', COUNT(*) FROM staging.users;
+```
+
+### Export to Parquet
+
+```sql
+COPY (SELECT * FROM mydb.orders WHERE status = 'completed')
+TO 'orders.parquet' (FORMAT PARQUET);
+```
+
+### Join D1 with Local Data
+
+```sql
+SELECT u.name, COUNT(*) as order_count
+FROM mydb.users u
+JOIN mydb.orders o ON u.id = o.user_id
+GROUP BY u.name;
+```
+
+## How It Works
+
+### Architecture
 
 ```text
-┌──────────────────────────┬────────────┬─────────┬─────────┬──────────┬──────────────┐
-│           url            │    date    │  stars  │  forks  │ releases │ contributors │
-│         varchar          │  varchar   │ varchar │ varchar │ varchar  │   varchar    │
-├──────────────────────────┼────────────┼─────────┼─────────┼──────────┼──────────────┤
-│ github.com/duckdb/duckdb │ 2021-04-06 │ NULL    │ NULL    │ 17       │ 59           │
-│ github.com/duckdb/duckdb │ 2022-01-07 │ 4.1k    │ 358     │ 22       │ 91           │
-│ github.com/duckdb/duckdb │ 2023-01-08 │ 7.9k    │ 745     │ 29       │ 170          │
-│ github.com/duckdb/duckdb │ 2024-01-23 │ 14k     │ 1.3k    │ 36       │ 277          │
-│ github.com/duckdb/duckdb │ 2025-01-04 │ 25.5k   │ 2k      │ 45       │ 389          │
-└──────────────────────────┴────────────┴─────────┴─────────┴──────────┴──────────────┘
+DuckDB → D1Catalog (custom) → D1TransactionManager (batch buffering)
+            ↓
+      Auto-created views
+            ↓
+      d1_scan (table function)
+            ↓
+      Cloudflare D1 API
 ```
 
-**This query makes only 6 HTTP requests** despite potentially matching thousands of archived snapshots:
+**Key optimizations:**
 
-| Request | URL |
-|---------|-----|
-| 1 | CDX API query with all filters and `&collapse=timestamp:4&limit=10` |
-| 2-6 | Fetch 5 archived pages (one per year) |
+- **Filter pushdown** - WHERE clauses sent to D1
+- **LIMIT pushdown** - LIMIT sent to D1 API
+- **Projection pushdown** - Only requested columns fetched
+- **Batch buffering** - Multiple writes = one HTTP request
 
-The extension automatically:
-
-- Pushes `WHERE` filters (`statuscode`, `mimetype`) to the CDX API
-- Pushes `LIMIT 10` to the API
-- Pushes `DISTINCT ON(year)` as `&collapse=timestamp:4` (dedupe by year)
-- Only requests `response.body` for the 5 matching rows
-- Only fetches needed fields (`timestamp`, `original`) via `&fl=` parameter
-
-## How Pushdown Works
-
-### 1. Filter Pushdown (WHERE)
-
-WHERE clauses are converted to CDX API parameters:
-
-```sql
-SELECT url FROM wayback_machine()
-WHERE url LIKE 'example.com/%'      -- Pushed as: url=example.com/*
-  AND statuscode = 200              -- Pushed as: &filter=statuscode:200
-  AND mimetype = 'text/html'        -- Pushed as: &filter=mimetype:text/html
-  AND mimetype != 'application/pdf' -- Pushed as: &filter=!mimetype:application/pdf
-  AND timestamp > '2020-01-01'      -- Pushed as: &from=20200101
-LIMIT 10;
-```
-
-### 2. LIMIT Pushdown
-
-LIMIT goes directly to the CDX API - no over-fetching:
-
-```sql
--- CDX API receives &limit=5, returns exactly 5 records
-SELECT url FROM wayback_machine()
-WHERE url LIKE 'example.com/%'
-LIMIT 5;
-```
-
-### 3. SELECT Pushdown (Projection)
-
-Only requested columns are fetched via `&fl=` parameter:
-
-```sql
--- Fast: CDX returns only url field (&fl=original)
-SELECT url FROM wayback_machine()
-WHERE url LIKE 'example.com/%' LIMIT 10;
-
--- Slower: Also downloads archived page content
-SELECT url, response.body FROM wayback_machine()
-WHERE url LIKE 'example.com/%' LIMIT 10;
-```
-
-### 4. DISTINCT ON Pushdown (Collapse)
-
-`DISTINCT ON` is pushed as the CDX `&collapse=` parameter:
-
-```sql
--- One snapshot per year: &collapse=timestamp:4
-SELECT DISTINCT ON(year) url, timestamp
-FROM wayback_machine() WHERE url = 'example.com';
-
--- One snapshot per year+month: &collapse=timestamp:6
-SELECT DISTINCT ON(year, month) url, timestamp
-FROM wayback_machine() WHERE url = 'example.com';
-
--- One per unique digest (content hash): &collapse=digest
-SELECT DISTINCT ON(digest) url, timestamp
-FROM wayback_machine() WHERE url LIKE 'example.com/%';
-
--- Multiple collapse params: &collapse=digest&collapse=statuscode
-SELECT DISTINCT ON(digest, statuscode) url, timestamp
-FROM wayback_machine() WHERE url LIKE 'example.com/%';
-
--- Prefix collapse (first 6 chars of urlkey): &collapse=urlkey:6
-SELECT DISTINCT ON(urlkey[:6]) url, timestamp
-FROM wayback_machine() WHERE url LIKE 'example.com/%';
-```
-
-## Response Fetching
-
-When you select `response.body`, the extension fetches archived pages:
-
-```sql
--- No page fetching (CDX API only)
-SELECT url, timestamp FROM wayback_machine()
-WHERE url = 'example.com' LIMIT 5;
-
--- Fetches 5 archived pages from web.archive.org
-SELECT url, timestamp, response.body FROM wayback_machine()
-WHERE url = 'example.com' LIMIT 5;
-```
-
-Each archived page is fetched via:
+### Transaction Batching
 
 ```text
-https://web.archive.org/web/{timestamp}id_/{url}
+BEGIN TRANSACTION
+  INSERT statement 1  →  Buffered
+  INSERT statement 2  →  Buffered
+  UPDATE statement    →  Buffered
+COMMIT                →  Single batch HTTP request to D1
 ```
 
-## Wayback Machine
+**Important**: D1 uses auto-commit per statement (not true ACID transactions). Best for bulk operations where per-statement atomicity is acceptable.
+
+## Documentation
+
+- 📚 **[Get Cloudflare Credentials](docs/CLOUDFLARE-CREDENTIALS.md)** - Account ID & API Token setup
+- 📖 **[Complete Usage Guide](D1-USAGE-EXAMPLE.md)** - All features & examples
+- 🏗️ **[Implementation Details](D1-ATTACH-SOLUTION.md)** - Architecture & transaction batching
+- 🧪 **[Test Scripts](test-d1-syntax.sql)** - Example queries and verification
+
+## Performance Tips
+
+✅ **Use filter pushdown:**
 
 ```sql
--- Find archived snapshots
-SELECT url, timestamp, statuscode
-FROM wayback_machine()
-WHERE url LIKE 'example.com/%'
-  AND statuscode = 200
-LIMIT 10;
+-- Good - filter sent to D1
+SELECT * FROM mydb.users WHERE id = 123;
 
--- Get latest snapshot
-SELECT url, timestamp, response.body
-FROM wayback_machine()
-WHERE url = 'example.com/about'
-  AND statuscode = 200
-ORDER BY timestamp DESC
-LIMIT 1;
+-- Bad - all data fetched then filtered
+SELECT * FROM (SELECT * FROM mydb.users) WHERE id = 123;
 ```
 
-### Wayback Machine URL Patterns
+✅ **Batch writes:**
 
 ```sql
-WHERE url = 'example.com'           -- Exact match
-WHERE url LIKE 'example.com/%'      -- Prefix match (paths)
-WHERE url LIKE '%.example.com'      -- Domain match (subdomains)
+-- Good - one HTTP request
+BEGIN TRANSACTION;
+  INSERT INTO mydb.logs SELECT * FROM read_csv('data.csv');
+COMMIT;
 ```
 
-### Wayback Machine Columns
-
-| Column | Type | Description |
-|--------|------|-------------|
-| url | VARCHAR | Original URL |
-| urlkey | VARCHAR | SURT-formatted URL |
-| timestamp | TIMESTAMP | Archive timestamp |
-| year | INTEGER | Year extracted from timestamp |
-| month | INTEGER | Month extracted from timestamp |
-| statuscode | INTEGER | HTTP status code |
-| mimetype | VARCHAR | Content MIME type |
-| digest | VARCHAR | Content hash |
-| length | BIGINT | Content length |
-| response | STRUCT | Response with `body` and `error` fields |
-
-### Wayback Machine Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| max_results | BIGINT | 100 | Maximum results from CDX API |
-| collapse | VARCHAR | - | Manual collapse field (prefer DISTINCT ON) |
-| debug | BOOLEAN | false | Show `cdx_url` column with generated API URL |
-| timeout | BIGINT | 180 | Timeout in seconds for fetching responses |
-
-## Common Crawl Index
+✅ **Export for heavy processing:**
 
 ```sql
--- Find HTML pages from a domain
-SELECT url, timestamp, statuscode
-FROM common_crawl_index()
-WHERE url LIKE '%.example.com/%'
-  AND statuscode = 200
-  AND mimetype = 'text/html'
-LIMIT 10;
-
--- Fetch page content (downloads from WARC files)
-SELECT url, response.body
-FROM common_crawl_index()
-WHERE url LIKE 'https://example.com/%'
-  AND statuscode = 200
-LIMIT 1;
-
--- Use specific crawl
-SELECT url FROM common_crawl_index()
-WHERE crawl_id = 'CC-MAIN-2025-47'
-  AND url LIKE '%.example.com/%'
-LIMIT 10;
+-- Export to local Parquet, process locally
+COPY (SELECT * FROM mydb.large_table) TO 'local.parquet';
+SELECT * FROM 'local.parquet' WHERE complex_calculation(...);
 ```
 
-### Common Crawl URL Patterns
+## Limitations
+
+| Limitation | Impact | Workaround |
+|------------|--------|------------|
+| No true ACID transactions | Statements auto-commit | Use `d1_execute()` for single statements |
+| No rollback after commit | Can't undo committed data | Plan operations carefully |
+| 30 second batch timeout | Large batches may fail | Split into smaller batches |
+| Read-your-writes in txn | Buffered writes invisible until commit | Commit before reading |
+| No DDL via ATTACH | Can't CREATE TABLE | Use `d1_execute()` for DDL |
+
+## Building from Source
+
+```bash
+# Clone repository
+git clone https://github.com/onnimonni/duckdb-cloudflare.git
+cd duckdb-cloudflare
+
+# Initialize submodules
+git submodule update --init --recursive
+
+# Build
+make release GEN=ninja
+
+# Test
+./build/release/duckdb -f test-d1-syntax.sql
+```
+
+## Troubleshooting
+
+### "D1 attach requires a D1 secret"
+
+**Solution:** Create a secret first:
 
 ```sql
-WHERE url LIKE '%.example.com/%'        -- Domain wildcard (subdomains)
-WHERE url LIKE 'https://example.com/%'  -- Prefix match
-WHERE url SIMILAR TO '.*example\.com/$' -- Regex match
+CREATE SECRET d1 (TYPE d1, ACCOUNT_ID '...', API_TOKEN '...');
 ```
 
-### Common Crawl Columns
+### "HTTP request failed with status 401"
 
-| Column | Type | Description |
-|--------|------|-------------|
-| url | VARCHAR | Original URL |
-| timestamp | TIMESTAMP | Crawl timestamp |
-| crawl_id | VARCHAR | Crawl identifier (e.g., CC-MAIN-2025-47) |
-| statuscode | INTEGER | HTTP status code |
-| mimetype | VARCHAR | Content MIME type |
-| digest | VARCHAR | Content hash |
-| filename | VARCHAR | WARC filename |
-| offset | BIGINT | Offset in WARC |
-| length | BIGINT | Content length |
-| response | STRUCT | Parsed WARC response (headers + body) |
-| warc | STRUCT | WARC metadata |
+**Cause:** Invalid API token
 
-### Common Crawl Parameters
+**Solution:**
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| max_results | BIGINT | 100 | Maximum results from CDX API |
+1. Verify credentials in Cloudflare dashboard
+2. Create new token with D1 permissions
+3. Update secret
 
-## Examples
+### "D1 database not found"
 
-### Track website changes over time
+**Solution:** List databases to find correct name:
 
 ```sql
-SELECT DISTINCT ON(year)
-    timestamp,
-    length,
-    digest
-FROM wayback_machine()
-WHERE url = 'example.com'
-  AND statuscode = 200
-ORDER BY timestamp;
+SELECT name FROM d1_databases('d1');
 ```
 
-### Find all unique domains from a TLD
+## Contributing
 
-```sql
-SELECT DISTINCT regexp_extract(url, 'https?://([^/]+)', 1) as domain
-FROM wayback_machine()
-WHERE url LIKE '%.gov/%'
-  AND statuscode = 200
-LIMIT 1000;
-```
+Contributions welcome! Please:
 
-### Export URLs to file
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
-```sql
-COPY (
-  SELECT url, timestamp
-  FROM common_crawl_index()
-  WHERE url LIKE '%.example.com/%'
-    AND statuscode = 200
-  LIMIT 10000
-) TO 'urls.csv';
-```
+## Links
 
-## Data Sources
-
-- **Wayback Machine**: <https://web.archive.org> - Continuous archiving since 1996
-- **Common Crawl**: <https://commoncrawl.org> - Monthly web crawls since 2008
-
-## CDX API Documentation
-
-- **CDX Server API Reference**: <https://github.com/webrecorder/pywb/wiki/CDX-Server-API>
-- **Common Crawl Index API**: <https://index.commoncrawl.org>
-- **Wayback Machine CDX API**: <https://web.archive.org/cdx/search/cdx>
+- **DuckDB Community Extensions**: <https://duckdb.org/community_extensions/>
+- **Cloudflare D1 Docs**: <https://developers.cloudflare.com/d1/>
+- **API Token Guide**: <https://developers.cloudflare.com/fundamentals/api/get-started/create-token/>
+- **GitHub Repository**: <https://github.com/onnimonni/duckdb-cloudflare>
+- **Report Issues**: <https://github.com/onnimonni/duckdb-cloudflare/issues>
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) file
+
+---
+
+Made with ❤️ for the DuckDB community
+
+*Query Cloudflare D1 from your local database!*

@@ -1,0 +1,133 @@
+extension:
+  name: cloudflare
+  description: "Query Cloudflare D1 databases directly from DuckDB with ATTACH DATABASE syntax, transaction batching, and automatic query optimization"
+  version: 0.1.0
+  language: C++
+  build: cmake
+  license: MIT
+  maintainers:
+    - Onni Hakala
+
+repo:
+  github: onnimonni/duckdb-cloudflare
+  ref: main
+
+docs:
+  hello_world: |
+    -- Create Cloudflare D1 secret
+    CREATE SECRET d1 (TYPE d1, ACCOUNT_ID 'your-account-id', API_TOKEN 'your-api-token');
+
+    -- List available databases
+    SELECT * FROM d1_databases('d1');
+
+    -- Attach D1 database with natural syntax
+    ATTACH 'my-database' AS mydb (TYPE d1);
+
+    -- Query data with automatic filter/LIMIT pushdown
+    SELECT * FROM mydb.users WHERE active = true LIMIT 10;
+
+    -- Batch multiple operations in one request
+    BEGIN TRANSACTION;
+      INSERT INTO mydb.logs VALUES (1, 'Event A');
+      INSERT INTO mydb.logs VALUES (2, 'Event B');
+    COMMIT;
+
+  extended_description: |
+    # Cloudflare Extension for DuckDB
+
+    Connect DuckDB to Cloudflare D1 databases with native ATTACH DATABASE syntax.
+
+    ## Features
+
+    - **Natural ATTACH syntax**: `ATTACH 'database' AS mydb (TYPE d1)` - no SECRET parameter needed
+    - **Auto-create views**: All tables automatically available as views
+    - **Transaction batching**: Multiple operations sent in single HTTP request
+    - **Query optimization**: Automatic filter, LIMIT, and projection pushdown
+    - **Secret management**: Store credentials once with `CREATE SECRET`
+
+    ## D1 Quick Start
+
+    1. **Get credentials** from Cloudflare Dashboard:
+       - Account ID: D1 → Database → Right sidebar
+       - API Token: Profile → API Tokens → Create Token (with D1 permissions)
+
+    2. **Create secret**:
+       ```sql
+       CREATE SECRET d1 (
+           TYPE d1,
+           ACCOUNT_ID 'your-cloudflare-account-id',
+           API_TOKEN 'your-cloudflare-api-token'
+       );
+       ```
+
+    3. **Attach database**:
+       ```sql
+       ATTACH 'my-database' AS mydb (TYPE d1);
+       SELECT * FROM mydb.users LIMIT 10;
+       ```
+
+    ## D1 Functions
+
+    | Function | Purpose |
+    |----------|---------|
+    | `d1_databases(secret)` | List all D1 databases |
+    | `d1_tables(secret, db)` | List tables in database |
+    | `d1_query(secret, db, sql)` | Execute query with results |
+    | `d1_execute(secret, db, sql)` | Execute statement (INSERT/UPDATE/DELETE) |
+    | `d1_scan(table, secret, db_id)` | Scan table (used internally by views) |
+
+    ## Transaction Batching Performance
+
+    Batch operations for significant performance improvement:
+
+    ```sql
+    -- Multiple operations = one HTTP request
+    BEGIN TRANSACTION;
+      INSERT INTO mydb.users VALUES (1, 'Alice');
+      INSERT INTO mydb.users VALUES (2, 'Bob');
+      UPDATE mydb.settings SET value = 'new' WHERE key = 'config';
+    COMMIT;
+    ```
+
+    **Note**: D1 transactions use auto-commit (not true ACID). Best for bulk operations where per-statement atomicity is acceptable.
+
+    ## Advanced Usage
+
+    ### Multiple Cloudflare Accounts
+    ```sql
+    CREATE SECRET prod (TYPE d1, ACCOUNT_ID 'prod-id', API_TOKEN 'prod-token');
+    CREATE SECRET staging (TYPE d1, ACCOUNT_ID 'staging-id', API_TOKEN 'staging-token');
+
+    ATTACH 'prod-db' AS prod (TYPE d1, SECRET 'prod');
+    ATTACH 'staging-db' AS staging (TYPE d1, SECRET 'staging');
+
+    -- Compare across environments
+    SELECT 'prod' as env, COUNT(*) FROM prod.users
+    UNION ALL
+    SELECT 'staging', COUNT(*) FROM staging.users;
+    ```
+
+    ### Export D1 Data to Parquet
+    ```sql
+    COPY (SELECT * FROM mydb.orders WHERE status = 'completed')
+    TO 'orders.parquet' (FORMAT PARQUET);
+    ```
+
+    ### Join D1 with Local Data
+    ```sql
+    SELECT u.name, COUNT(*) as order_count
+    FROM mydb.users u
+    JOIN mydb.orders o ON u.id = o.user_id
+    GROUP BY u.name;
+    ```
+
+    ## Documentation
+
+    - **Credentials Setup**: [docs/CLOUDFLARE-CREDENTIALS.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/docs/CLOUDFLARE-CREDENTIALS.md)
+    - **Full Usage Guide**: [D1-USAGE-EXAMPLE.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/D1-USAGE-EXAMPLE.md)
+    - **Implementation**: [D1-ATTACH-SOLUTION.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/D1-ATTACH-SOLUTION.md)
+
+    ## Links
+
+    - **Cloudflare D1 Docs**: https://developers.cloudflare.com/d1/
+    - **GitHub**: https://github.com/onnimonni/duckdb-cloudflare

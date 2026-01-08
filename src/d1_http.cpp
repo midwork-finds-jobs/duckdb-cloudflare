@@ -440,6 +440,112 @@ D1QueryResult D1ExecuteQuery(const D1Config &config, const string &sql, const ve
 	return ParseD1Response(response);
 }
 
+// ========================================
+// D1 BATCH EXECUTION
+// ========================================
+
+// Parse the batch API response
+static D1BatchResult ParseD1BatchResponse(const string &response) {
+	D1BatchResult batch_result;
+
+	// Check top-level success
+	batch_result.success = ExtractJSONBool(response, "success");
+
+	// Check for errors at top level
+	size_t errors_pos = response.find("\"errors\":");
+	if (errors_pos != string::npos) {
+		size_t arr_start = response.find('[', errors_pos);
+		size_t arr_end = response.find(']', arr_start);
+		if (arr_start != string::npos && arr_end != string::npos) {
+			string errors_arr = response.substr(arr_start, arr_end - arr_start + 1);
+			if (errors_arr != "[]") {
+				// Extract first error message
+				size_t msg_pos = errors_arr.find("\"message\":");
+				if (msg_pos != string::npos) {
+					batch_result.error = ExtractJSONString(errors_arr.substr(msg_pos), "message");
+				}
+			}
+		}
+	}
+
+	if (!batch_result.success && !batch_result.error.empty()) {
+		return batch_result;
+	}
+
+	// Parse result array
+	size_t result_pos = response.find("\"result\":");
+	if (result_pos == string::npos) {
+		return batch_result;
+	}
+
+	// Find the results array
+	size_t arr_start = response.find('[', result_pos);
+	if (arr_start == string::npos) {
+		return batch_result;
+	}
+
+	// Parse each result object in the array
+	size_t pos = arr_start + 1;
+	int brace_depth = 0;
+	int bracket_depth = 0;
+	size_t obj_start = 0;
+
+	while (pos < response.size()) {
+		char c = response[pos];
+
+		if (c == '{') {
+			if (brace_depth == 0 && bracket_depth == 0) {
+				obj_start = pos;
+			}
+			brace_depth++;
+		} else if (c == '}') {
+			brace_depth--;
+			if (brace_depth == 0 && bracket_depth == 0) {
+				// Extract and parse this result
+				string result_json = response.substr(obj_start, pos - obj_start + 1);
+				batch_result.results.push_back(ParseD1Response(result_json));
+			}
+		} else if (c == '[') {
+			bracket_depth++;
+		} else if (c == ']') {
+			if (bracket_depth > 0) {
+				bracket_depth--;
+			} else {
+				// End of result array
+				break;
+			}
+		}
+
+		pos++;
+	}
+
+	return batch_result;
+}
+
+D1BatchResult D1ExecuteBatch(const D1Config &config, const vector<string> &statements) {
+	if (statements.empty()) {
+		D1BatchResult result;
+		result.success = true;
+		return result;
+	}
+
+	// Build JSON request body: [{"sql": "..."}, {"sql": "..."}, ...]
+	string body = "[";
+	for (size_t i = 0; i < statements.size(); i++) {
+		if (i > 0) {
+			body += ",";
+		}
+		body += "{\"sql\":\"" + EscapeJSON(statements[i]) + "\"}";
+	}
+	body += "]";
+
+	// Execute request - batch uses the query endpoint with array body
+	string response = HTTPPost(config.GetQueryUrl(), body, config.api_token);
+
+	// Parse batch response
+	return ParseD1BatchResponse(response);
+}
+
 vector<D1DatabaseInfo> D1ListDatabases(const D1Config &config) {
 	vector<D1DatabaseInfo> databases;
 

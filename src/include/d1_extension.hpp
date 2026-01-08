@@ -105,6 +105,19 @@ struct D1QueryResult {
 };
 
 // ========================================
+// D1 BATCH RESULT
+// ========================================
+
+struct D1BatchResult {
+	bool success;
+	vector<D1QueryResult> results; // One result per statement
+	string error;
+
+	D1BatchResult() : success(false) {
+	}
+};
+
+// ========================================
 // D1 DATABASE INFO
 // ========================================
 
@@ -127,6 +140,9 @@ struct D1DatabaseInfo {
 
 // Execute a SQL query against D1 and return the result
 D1QueryResult D1ExecuteQuery(const D1Config &config, const string &sql, const vector<string> &params = {});
+
+// Execute multiple SQL statements as a batch
+D1BatchResult D1ExecuteBatch(const D1Config &config, const vector<string> &statements);
 
 // List all databases in the account
 vector<D1DatabaseInfo> D1ListDatabases(const D1Config &config);
