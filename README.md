@@ -1,6 +1,6 @@
 # Cloudflare Extension for DuckDB
 
-Query Cloudflare D1 databases directly from DuckDB with native ATTACH DATABASE syntax, transaction batching, and automatic query optimization.
+Query Cloudflare D1 databases and R2 SQL Iceberg tables directly from DuckDB with native syntax and automatic query optimization.
 
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.2-blue)](https://duckdb.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -15,14 +15,26 @@ LOAD cloudflare;
 
 ## Features
 
+### D1 (SQLite Databases)
+
 - ✅ **Natural ATTACH syntax** - `ATTACH 'database' AS mydb (TYPE d1)`
 - ✅ **No SECRET parameter needed** - Automatically finds D1 secret
 - ✅ **Auto-create views** - All tables instantly queryable
 - ✅ **Transaction batching** - Multiple operations in single HTTP request
 - ✅ **Query optimization** - Automatic filter/LIMIT/projection pushdown
+
+### R2 SQL (Apache Iceberg Tables)
+
+- ✅ **Query Iceberg tables** - Read Apache Iceberg tables stored in R2 buckets
+- ✅ **SHOW commands** - List databases, namespaces, and tables
+- ✅ **Table introspection** - DESCRIBE tables to view schema
+- ✅ **Standard SQL** - SELECT with WHERE, GROUP BY, ORDER BY, LIMIT
+
+### Common
+
 - ✅ **Secret management** - Store credentials once with CREATE SECRET
 
-## Quick Start
+## Quick Start - D1
 
 ### 1. Get Credentials
 
@@ -68,6 +80,48 @@ BEGIN TRANSACTION;
 COMMIT;  -- All 3 statements sent as one batch
 ```
 
+## Quick Start - R2 SQL
+
+### 1. Get R2 Credentials
+
+From [Cloudflare Dashboard](https://dash.cloudflare.com):
+
+- **Account ID**: `R2 → Overview → Right sidebar`
+- **API Token**: `Profile → API Tokens → Create Token` with permissions:
+  - Workers R2 SQL Read
+  - Workers R2 Data Catalog Write
+  - Workers R2 Storage Write
+
+### 2. Create R2 Secret
+
+```sql
+CREATE SECRET r2sql (
+    TYPE r2_sql,
+    ACCOUNT_ID 'your-cloudflare-account-id',
+    API_TOKEN 'your-cloudflare-api-token'
+);
+```
+
+### 3. Query Iceberg Tables
+
+```sql
+-- List namespaces in bucket
+SELECT * FROM r2_sql_databases('r2sql', 'my-bucket');
+
+-- List tables in namespace
+SELECT * FROM r2_sql_tables('r2sql', 'my-bucket', 'my_namespace');
+
+-- Describe table schema
+SELECT * FROM r2_sql_describe('r2sql', 'my-bucket', 'my_namespace.my_table');
+
+-- Query data
+SELECT * FROM r2_sql_query(
+    'r2sql',
+    'my-bucket',
+    'SELECT * FROM my_namespace.my_table WHERE id > 100 LIMIT 10'
+);
+```
+
 ## D1 Functions
 
 | Function | Purpose | Example |
@@ -76,6 +130,15 @@ COMMIT;  -- All 3 statements sent as one batch
 | `d1_tables(secret, db)` | List tables | `SELECT * FROM d1_tables('d1', 'my-db')` |
 | `d1_query(secret, db, sql)` | Execute query | `SELECT * FROM d1_query('d1', 'my-db', 'SELECT * FROM users')` |
 | `d1_execute(secret, db, sql)` | Execute statement | `SELECT d1_execute('d1', 'my-db', 'INSERT INTO ...')` |
+
+## R2 SQL Functions
+
+| Function | Purpose | Example |
+|----------|---------|---------|
+| `r2_sql_databases(secret, bucket)` | List namespaces | `SELECT * FROM r2_sql_databases('r2sql', 'my-bucket')` |
+| `r2_sql_tables(secret, bucket, [namespace])` | List tables | `SELECT * FROM r2_sql_tables('r2sql', 'my-bucket', 'ns')` |
+| `r2_sql_describe(secret, bucket, table)` | Describe table | `SELECT * FROM r2_sql_describe('r2sql', 'my-bucket', 'ns.table')` |
+| `r2_sql_query(secret, bucket, sql)` | Execute SELECT | `SELECT * FROM r2_sql_query('r2sql', 'bucket', 'SELECT ...')` |
 
 ## Advanced Usage
 

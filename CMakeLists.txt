@@ -23,6 +23,9 @@ set(EXTENSION_SOURCES
     src/d1_scan.cpp
     src/storage/d1_transaction.cpp
     src/storage/d1_transaction_manager.cpp
+    src/r2_http.cpp
+    src/r2_functions.cpp
+    src/r2_secret.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

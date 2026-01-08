@@ -2,6 +2,7 @@
 
 #include "cloudflare_extension.hpp"
 #include "d1_extension.hpp"
+#include "r2_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 
@@ -27,6 +28,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register d1_scan table function
 	RegisterD1ScanFunction(loader);
+
+	// Register Cloudflare R2 SQL functions
+	RegisterR2SQLQueryFunction(loader);
+	RegisterR2SQLDatabasesFunction(loader);
+	RegisterR2SQLTablesFunction(loader);
+	RegisterR2SQLDescribeFunction(loader);
+
+	// Register R2 SQL secret type
+	RegisterR2SQLSecretType(loader);
 
 	// Register optimizer extension for LIMIT pushdown
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());

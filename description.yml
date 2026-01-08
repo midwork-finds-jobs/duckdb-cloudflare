@@ -1,6 +1,6 @@
 extension:
   name: cloudflare
-  description: "Query Cloudflare D1 databases directly from DuckDB with ATTACH DATABASE syntax, transaction batching, and automatic query optimization"
+  description: "Query Cloudflare D1 databases and R2 SQL Iceberg tables from DuckDB with natural syntax and automatic query optimization"
   version: 0.1.0
   language: C++
   build: cmake
@@ -14,35 +14,36 @@ repo:
 
 docs:
   hello_world: |
-    -- Create Cloudflare D1 secret
+    -- D1: Create secret and query SQLite databases
     CREATE SECRET d1 (TYPE d1, ACCOUNT_ID 'your-account-id', API_TOKEN 'your-api-token');
-
-    -- List available databases
-    SELECT * FROM d1_databases('d1');
-
-    -- Attach D1 database with natural syntax
     ATTACH 'my-database' AS mydb (TYPE d1);
-
-    -- Query data with automatic filter/LIMIT pushdown
     SELECT * FROM mydb.users WHERE active = true LIMIT 10;
 
-    -- Batch multiple operations in one request
-    BEGIN TRANSACTION;
-      INSERT INTO mydb.logs VALUES (1, 'Event A');
-      INSERT INTO mydb.logs VALUES (2, 'Event B');
-    COMMIT;
+    -- R2 SQL: Query Apache Iceberg tables in R2 buckets
+    CREATE SECRET r2sql (TYPE r2_sql, ACCOUNT_ID 'your-account-id', API_TOKEN 'your-api-token');
+    SELECT * FROM r2_sql_query('r2sql', 'my-bucket',
+        'SELECT * FROM my_namespace.my_table LIMIT 10');
 
   extended_description: |
     # Cloudflare Extension for DuckDB
 
-    Connect DuckDB to Cloudflare D1 databases with native ATTACH DATABASE syntax.
+    Connect DuckDB to Cloudflare D1 databases and R2 SQL Iceberg tables.
 
     ## Features
 
+    ### D1 (SQLite Databases)
     - **Natural ATTACH syntax**: `ATTACH 'database' AS mydb (TYPE d1)` - no SECRET parameter needed
     - **Auto-create views**: All tables automatically available as views
     - **Transaction batching**: Multiple operations sent in single HTTP request
     - **Query optimization**: Automatic filter, LIMIT, and projection pushdown
+
+    ### R2 SQL (Apache Iceberg Tables)
+    - **Query Iceberg tables**: Read Apache Iceberg tables stored in R2 buckets
+    - **SHOW commands**: List databases, namespaces, and tables
+    - **Table introspection**: DESCRIBE tables to view schema
+    - **Standard SQL**: SELECT with WHERE, GROUP BY, ORDER BY, LIMIT
+
+    ### Common
     - **Secret management**: Store credentials once with `CREATE SECRET`
 
     ## D1 Quick Start
