@@ -154,13 +154,11 @@ static unique_ptr<TransactionManager> D1CreateTransactionManager(optional_ptr<St
 // ========================================
 
 void RegisterD1StorageExtension(DatabaseInstance &db) {
-	auto &config = DBConfig::GetConfig(db);
-
-	auto d1_storage = make_uniq<StorageExtension>();
+	auto d1_storage = make_shared_ptr<StorageExtension>();
 	d1_storage->attach = D1AttachFunction;
 	d1_storage->create_transaction_manager = D1CreateTransactionManager;
 
-	config.storage_extensions["d1"] = std::move(d1_storage);
+	StorageExtension::Register(DBConfig::GetConfig(db), "d1", std::move(d1_storage));
 }
 
 } // namespace duckdb
