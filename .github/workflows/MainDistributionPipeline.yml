@@ -18,7 +18,7 @@ jobs:
     with:
       duckdb_version: main
       ci_tools_version: main
-      extension_name: web_archive_cdx
+      extension_name: cloudflare
 
   code-quality-check:
     name: Code Quality Check
@@ -26,5 +26,5 @@ jobs:
     with:
       duckdb_version: main
       ci_tools_version: main
-      extension_name: web_archive_cdx
+      extension_name: cloudflare
       format_checks: 'format;tidy'
