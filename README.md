@@ -2,7 +2,7 @@
 
 Query Cloudflare D1 databases and R2 SQL Iceberg tables directly from DuckDB with native syntax and automatic query optimization.
 
-[![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.2-blue)](https://duckdb.org)
+[![DuckDB Version](https://img.shields.io/badge/DuckDB-v2.0.0-blue)](https://duckdb.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Community Extension](https://img.shields.io/badge/Community-Extension-orange)](https://duckdb.org/community_extensions/)
 
