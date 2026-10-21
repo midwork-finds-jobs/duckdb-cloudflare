@@ -1017,7 +1017,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1039,7 +1038,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1071,7 +1069,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1093,7 +1090,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1126,7 +1122,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1161,7 +1156,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				if (func.children.size() >= 2 &&
 				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1203,14 +1197,12 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		    filter->type == ExpressionType::OPERATOR_NOT) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
 			if (op.children.size() >= 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-
 				auto &inner_func = op.children[0]->Cast<BoundFunctionExpression>();
 
 				// NOT prefix(url, 'pattern') -> !~url:^pattern.*$ (negated regex match)
 				if (inner_func.function.name == "prefix" && inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1231,7 +1223,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				    inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
@@ -1255,7 +1246,6 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				    inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
