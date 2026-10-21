@@ -53,7 +53,7 @@ void RegisterR2SQLSecretType(ExtensionLoader &loader) {
 	loader.RegisterSecretType(secret_type);
 
 	// Register the secret function
-	CreateSecretFunction r2_sql_function = {secret_type.name, "config", CreateR2SQLSecret};
+	CreateSecretFunction r2_sql_function = {secret_type.name.GetIdentifierName(), "config", CreateR2SQLSecret};
 	r2_sql_function.named_parameters["account_id"] = LogicalType::VARCHAR;
 	r2_sql_function.named_parameters["api_token"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(r2_sql_function);
