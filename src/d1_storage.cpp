@@ -120,7 +120,8 @@ static unique_ptr<Catalog> D1AttachFunction(optional_ptr<StorageExtensionInfo> s
 
 		for (const auto &default_name : default_names) {
 			auto secret = secret_manager.GetSecretByName(transaction, default_name);
-			if (secret) {
+			// Only fall back to secrets of type d1 (e.g. a secret named "cloudflare" may be of another type)
+			if (secret && secret->secret && secret->secret->GetType() == "d1") {
 				secret_name = default_name;
 				break;
 			}
