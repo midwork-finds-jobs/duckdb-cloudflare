@@ -65,14 +65,15 @@ R2SQLConfig GetR2SQLConfigFromSecret(ClientContext &context, const string &secre
 
 	// Try to find the secret
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto secret_match = secret_manager.LookupSecret(transaction, secret_name, "r2_sql");
+	// Resolve by explicit name (LookupSecret matches by scope path, not name)
+	auto secret_entry = secret_manager.GetSecretByName(transaction, secret_name);
 
-	if (!secret_match.HasMatch()) {
+	if (!secret_entry || !secret_entry->secret) {
 		throw InvalidInputException("R2 SQL secret '%s' not found. Create it with: CREATE SECRET %s (TYPE r2_sql, ...)",
 		                            secret_name, secret_name);
 	}
 
-	auto &secret = secret_match.GetSecret();
+	auto &secret = *secret_entry->secret;
 	if (secret.GetType() != "r2_sql") {
 		throw InvalidInputException("Secret '%s' is not an R2 SQL secret (type is '%s')", secret_name,
 		                            secret.GetType());

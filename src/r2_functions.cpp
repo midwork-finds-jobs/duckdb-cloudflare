@@ -175,9 +175,12 @@ static void R2SQLTablesFunction(ClientContext &context, TableFunctionInput &data
 }
 
 void RegisterR2SQLTablesFunction(ExtensionLoader &loader) {
-	TableFunction r2_sql_tables("r2_sql_tables", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                            R2SQLTablesFunction, R2SQLTablesBind);
-
+	// namespace is optional: register 2- and 3-arg overloads
+	TableFunctionSet r2_sql_tables("r2_sql_tables");
+	r2_sql_tables.AddFunction(
+	    TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, R2SQLTablesFunction, R2SQLTablesBind));
+	r2_sql_tables.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                        R2SQLTablesFunction, R2SQLTablesBind));
 	loader.RegisterFunction(r2_sql_tables);
 }
 

@@ -1,0 +1,103 @@
+# name: test/sql/cloudflare.test
+# description: Offline tests for the cloudflare extension (no network access)
+# group: [sql]
+
+require cloudflare
+
+# All functions are registered
+query I
+SELECT list_sort(list(DISTINCT function_name)) FROM duckdb_functions()
+WHERE function_name LIKE 'd1\_%' ESCAPE '\' OR function_name LIKE 'r2\_sql\_%' ESCAPE '\';
+----
+[d1_databases, d1_execute, d1_query, d1_scan, d1_tables, r2_sql_databases, r2_sql_describe, r2_sql_query, r2_sql_tables]
+
+# Secret types are registered
+statement ok
+CREATE SECRET my_d1 (TYPE d1, ACCOUNT_ID 'acc123', API_TOKEN 'supersecrettoken');
+
+statement ok
+CREATE SECRET my_r2 (TYPE r2_sql, ACCOUNT_ID 'acc456', API_TOKEN 'othersecrettoken');
+
+query III
+SELECT name, type, provider FROM duckdb_secrets() ORDER BY name;
+----
+my_d1	d1	config
+my_r2	r2_sql	config
+
+# api_token is redacted, account_id is not
+query II
+SELECT name, secret_string LIKE '%account_id=acc%' FROM duckdb_secrets() ORDER BY name;
+----
+my_d1	true
+my_r2	true
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE secret_string LIKE '%secrettoken%';
+----
+0
+
+# Secret validation
+statement error
+CREATE SECRET bad_d1 (TYPE d1, ACCOUNT_ID 'acc');
+----
+D1 secret requires 'api_token' parameter
+
+statement error
+CREATE SECRET bad_d1 (TYPE d1, API_TOKEN 'tok');
+----
+D1 secret requires 'account_id' parameter
+
+statement error
+CREATE SECRET bad_r2 (TYPE r2_sql, ACCOUNT_ID 'acc');
+----
+R2 SQL secret requires API_TOKEN parameter
+
+# Unknown secret names
+statement error
+SELECT * FROM d1_databases(secret := 'nope');
+----
+D1 secret 'nope' not found
+
+statement error
+SELECT * FROM r2_sql_query('nope', 'bucket', 'SELECT 1');
+----
+R2 SQL secret 'nope' not found
+
+statement error
+SELECT * FROM r2_sql_tables('nope', 'bucket');
+----
+R2 SQL secret 'nope' not found
+
+# Explicit secret names are resolved by name and type-checked
+statement error
+SELECT * FROM d1_databases(secret := 'my_r2');
+----
+is not a D1 secret
+
+statement error
+SELECT * FROM r2_sql_tables('my_d1', 'bucket', 'ns');
+----
+is not an R2 SQL secret
+
+statement error
+SELECT d1_execute('SELECT 1', 'nope', 'db');
+----
+D1 secret 'nope' not found
+
+# Missing database for d1_query
+statement error
+SELECT * FROM d1_query('SELECT 1', secret := 'my_d1');
+----
+database or database_id required
+
+# Unknown named parameter
+statement error
+SELECT * FROM d1_databases(bogus := 'x');
+----
+bogus
+
+# ATTACH without any default-named D1 secret
+statement error
+ATTACH 'mydb' AS mydb (TYPE d1);
+----
+D1 attach requires a D1 secret

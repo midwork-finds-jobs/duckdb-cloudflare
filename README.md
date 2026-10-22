@@ -258,7 +258,7 @@ SELECT * FROM 'local.parquet' WHERE complex_calculation(...);
 
 ```bash
 # Clone repository
-git clone https://github.com/onnimonni/duckdb-cloudflare.git
+git clone https://github.com/midwork-finds-jobs/duckdb-cloudflare.git
 cd duckdb-cloudflare
 
 # Initialize submodules
@@ -314,8 +314,8 @@ Contributions welcome! Please:
 - **DuckDB Community Extensions**: <https://duckdb.org/community_extensions/>
 - **Cloudflare D1 Docs**: <https://developers.cloudflare.com/d1/>
 - **API Token Guide**: <https://developers.cloudflare.com/fundamentals/api/get-started/create-token/>
-- **GitHub Repository**: <https://github.com/onnimonni/duckdb-cloudflare>
-- **Report Issues**: <https://github.com/onnimonni/duckdb-cloudflare/issues>
+- **GitHub Repository**: <https://github.com/midwork-finds-jobs/duckdb-cloudflare>
+- **Report Issues**: <https://github.com/midwork-finds-jobs/duckdb-cloudflare/issues>
 
 ## License
 
