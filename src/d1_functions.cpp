@@ -90,7 +90,7 @@ static D1Config ResolveD1Config(ClientContext &context, TableFunctionBindInput &
 }
 
 static unique_ptr<FunctionData> D1QueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<D1QueryBindData>();
 
 	// Get required parameters
@@ -118,12 +118,12 @@ static unique_ptr<FunctionData> D1QueryBind(ClientContext &context, TableFunctio
 	// Infer column types from first row or use VARCHAR for all
 	if (bind_data->result.results.empty()) {
 		// No results - return empty with single column
-		names.push_back("result");
+		names.emplace_back("result");
 		return_types.push_back(LogicalType::VARCHAR);
 	} else {
 		// Use column order from result
 		for (const auto &col : bind_data->result.column_order) {
-			names.push_back(col);
+			names.emplace_back(col);
 			// Try to infer type from first row value
 			// For now, use VARCHAR for everything (D1 returns strings anyway)
 			return_types.push_back(LogicalType::VARCHAR);
@@ -167,11 +167,13 @@ static void D1QueryFunction(ClientContext &context, TableFunctionInput &data, Da
 void RegisterD1QueryFunction(ExtensionLoader &loader) {
 	TableFunction func("d1_query", {LogicalType::VARCHAR}, D1QueryFunction, D1QueryBind, D1QueryInitGlobal);
 
-	func.named_parameters["secret"] = LogicalType::VARCHAR;
-	func.named_parameters["account_id"] = LogicalType::VARCHAR;
-	func.named_parameters["api_token"] = LogicalType::VARCHAR;
-	func.named_parameters["database_id"] = LogicalType::VARCHAR;
-	func.named_parameters["database"] = LogicalType::VARCHAR;
+	func.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("secret", LogicalType::VARCHAR)
+		    .Add("account_id", LogicalType::VARCHAR)
+		    .Add("api_token", LogicalType::VARCHAR)
+		    .Add("database_id", LogicalType::VARCHAR)
+		    .Add("database", LogicalType::VARCHAR);
+	});
 
 	loader.RegisterFunction(func);
 }
@@ -198,7 +200,7 @@ struct D1DatabasesGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> D1DatabasesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<D1DatabasesBindData>();
 
 	// Check for secret parameter first
@@ -279,9 +281,11 @@ static void D1DatabasesFunction(ClientContext &context, TableFunctionInput &data
 void RegisterD1DatabasesFunction(ExtensionLoader &loader) {
 	TableFunction func("d1_databases", {}, D1DatabasesFunction, D1DatabasesBind, D1DatabasesInitGlobal);
 
-	func.named_parameters["secret"] = LogicalType::VARCHAR;
-	func.named_parameters["account_id"] = LogicalType::VARCHAR;
-	func.named_parameters["api_token"] = LogicalType::VARCHAR;
+	func.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("secret", LogicalType::VARCHAR)
+		    .Add("account_id", LogicalType::VARCHAR)
+		    .Add("api_token", LogicalType::VARCHAR);
+	});
 
 	loader.RegisterFunction(func);
 }
@@ -308,7 +312,7 @@ struct D1TablesGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> D1TablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<D1TablesBindData>();
 
 	// Check for secret parameter first
@@ -405,11 +409,13 @@ static void D1TablesFunction(ClientContext &context, TableFunctionInput &data, D
 void RegisterD1TablesFunction(ExtensionLoader &loader) {
 	TableFunction func("d1_tables", {}, D1TablesFunction, D1TablesBind, D1TablesInitGlobal);
 
-	func.named_parameters["secret"] = LogicalType::VARCHAR;
-	func.named_parameters["account_id"] = LogicalType::VARCHAR;
-	func.named_parameters["api_token"] = LogicalType::VARCHAR;
-	func.named_parameters["database_id"] = LogicalType::VARCHAR;
-	func.named_parameters["database"] = LogicalType::VARCHAR;
+	func.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("secret", LogicalType::VARCHAR)
+		    .Add("account_id", LogicalType::VARCHAR)
+		    .Add("api_token", LogicalType::VARCHAR)
+		    .Add("database_id", LogicalType::VARCHAR)
+		    .Add("database", LogicalType::VARCHAR);
+	});
 
 	loader.RegisterFunction(func);
 }
@@ -446,6 +452,9 @@ static void D1ExecuteScalarFunction(DataChunk &args, ExpressionState &state, Vec
 void RegisterD1ExecuteFunction(ExtensionLoader &loader) {
 	ScalarFunction func("d1_execute", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                    LogicalType::BIGINT, D1ExecuteScalarFunction);
+	// Performs remote writes and can throw
+	func.SetVolatile();
+	func.SetFallible();
 	loader.RegisterFunction(func);
 }
 

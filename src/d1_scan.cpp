@@ -35,7 +35,7 @@ struct D1ScanGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<D1ScanBindData>();
 
 	if (input.inputs.size() < 3) {
@@ -54,7 +54,7 @@ static unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunction
 	auto columns = D1GetTableColumns(bind_data->config, bind_data->table_name);
 
 	for (const auto &col : columns) {
-		names.push_back(col.name);
+		names.emplace_back(col.name);
 		return_types.push_back(SQLiteTypeToDuckDB(col.type));
 		bind_data->column_names.push_back(col.name);
 		bind_data->column_types.push_back(SQLiteTypeToDuckDB(col.type));
@@ -125,41 +125,44 @@ static string ValueToSQL(const Value &value) {
 
 // Helper: convert a single comparison expression to SQL
 static string ExpressionToSQL(Expression &expr, const vector<string> &column_names) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-		auto &comp = expr.Cast<BoundComparisonExpression>();
+	if (BoundComparisonExpression::IsComparison(expr)) {
+		auto &comp = expr.Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::Left(comp);
+		auto &right = BoundComparisonExpression::Right(comp);
+		auto comp_type = comp.GetExpressionType();
 
 		// Check for column op constant
-		if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-		    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-			auto &col_ref = comp.left->Cast<BoundColumnRefExpression>();
-			auto &constant = comp.right->Cast<BoundConstantExpression>();
+		if (left.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		    right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			auto &col_ref = left.Cast<BoundColumnRefExpression>();
+			auto &constant = right.Cast<BoundConstantExpression>();
 
-			string op = ComparisonTypeToSQL(comp.type);
+			string op = ComparisonTypeToSQL(comp_type);
 			if (!op.empty()) {
-				return col_ref.GetName() + " " + op + " " + ValueToSQL(constant.value);
+				return col_ref.GetName() + " " + op + " " + ValueToSQL(constant.GetValue());
 			}
 		}
 		// Check for constant op column (reversed)
-		if (comp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-		    comp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-			auto &col_ref = comp.right->Cast<BoundColumnRefExpression>();
-			auto &constant = comp.left->Cast<BoundConstantExpression>();
+		if (right.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		    left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			auto &col_ref = right.Cast<BoundColumnRefExpression>();
+			auto &constant = left.Cast<BoundConstantExpression>();
 
 			// Reverse the comparison
-			ExpressionType reversed = comp.type;
-			if (comp.type == ExpressionType::COMPARE_LESSTHAN) {
+			ExpressionType reversed = comp_type;
+			if (comp_type == ExpressionType::COMPARE_LESSTHAN) {
 				reversed = ExpressionType::COMPARE_GREATERTHAN;
-			} else if (comp.type == ExpressionType::COMPARE_GREATERTHAN) {
+			} else if (comp_type == ExpressionType::COMPARE_GREATERTHAN) {
 				reversed = ExpressionType::COMPARE_LESSTHAN;
-			} else if (comp.type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+			} else if (comp_type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
 				reversed = ExpressionType::COMPARE_GREATERTHANOREQUALTO;
-			} else if (comp.type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+			} else if (comp_type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
 				reversed = ExpressionType::COMPARE_LESSTHANOREQUALTO;
 			}
 
 			string op = ComparisonTypeToSQL(reversed);
 			if (!op.empty()) {
-				return col_ref.GetName() + " " + op + " " + ValueToSQL(constant.value);
+				return col_ref.GetName() + " " + op + " " + ValueToSQL(constant.GetValue());
 			}
 		}
 	}
@@ -188,10 +191,10 @@ static void D1ScanPushdownComplexFilter(ClientContext &context, LogicalGet &get,
 		// Handle AND conjunctions
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
 			auto &conjunction = filter->Cast<BoundConjunctionExpression>();
-			if (conjunction.type == ExpressionType::CONJUNCTION_AND) {
+			if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 				bool all_converted = true;
 				vector<string> sub_conditions;
-				for (auto &child : conjunction.children) {
+				for (auto &child : conjunction.GetChildren()) {
 					string child_sql = ExpressionToSQL(*child, bind_data.column_names);
 					if (child_sql.empty()) {
 						all_converted = false;
@@ -340,7 +343,7 @@ void OptimizeD1ScanLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "d1_scan") {
+		if (get.function.GetName() != "d1_scan") {
 			OptimizeD1ScanLimitPushdown(op->children[0]);
 			return;
 		}
@@ -367,7 +370,7 @@ void OptimizeD1ScanLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "d1_scan") {
+		if (get.function.GetName() != "d1_scan") {
 			OptimizeD1ScanLimitPushdown(op->children[0]);
 			return;
 		}

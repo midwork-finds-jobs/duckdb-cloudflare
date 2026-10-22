@@ -9,7 +9,7 @@ extension:
     - Onni Hakala
 
 repo:
-  github: onnimonni/duckdb-cloudflare
+  github: midwork-finds-jobs/duckdb-cloudflare
   ref: main
 
 docs:
@@ -124,11 +124,11 @@ docs:
 
     ## Documentation
 
-    - **Credentials Setup**: [docs/CLOUDFLARE-CREDENTIALS.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/docs/CLOUDFLARE-CREDENTIALS.md)
-    - **Full Usage Guide**: [D1-USAGE-EXAMPLE.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/D1-USAGE-EXAMPLE.md)
-    - **Implementation**: [D1-ATTACH-SOLUTION.md](https://github.com/onnimonni/duckdb-cloudflare/blob/main/D1-ATTACH-SOLUTION.md)
+    - **Credentials Setup**: [docs/CLOUDFLARE-CREDENTIALS.md](https://github.com/midwork-finds-jobs/duckdb-cloudflare/blob/main/docs/CLOUDFLARE-CREDENTIALS.md)
+    - **Full Usage Guide**: [D1-USAGE-EXAMPLE.md](https://github.com/midwork-finds-jobs/duckdb-cloudflare/blob/main/D1-USAGE-EXAMPLE.md)
+    - **Implementation**: [D1-ATTACH-SOLUTION.md](https://github.com/midwork-finds-jobs/duckdb-cloudflare/blob/main/D1-ATTACH-SOLUTION.md)
 
     ## Links
 
     - **Cloudflare D1 Docs**: https://developers.cloudflare.com/d1/
-    - **GitHub**: https://github.com/onnimonni/duckdb-cloudflare
+    - **GitHub**: https://github.com/midwork-finds-jobs/duckdb-cloudflare

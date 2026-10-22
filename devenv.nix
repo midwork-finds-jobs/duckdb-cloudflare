@@ -28,7 +28,7 @@
 
     clang-tools
 
-    # Build dependencies for web_archive_cdx extension
+    # Build dependencies for cloudflare extension
     zlib
     openssl
     curl
