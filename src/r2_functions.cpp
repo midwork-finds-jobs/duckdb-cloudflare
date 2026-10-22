@@ -16,7 +16,7 @@ struct R2SQLQueryBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> R2SQLQueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<R2SQLQueryBindData>();
 
 	// Parameters: secret_name, bucket_name, sql
@@ -74,7 +74,7 @@ struct R2SQLDatabasesBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> R2SQLDatabasesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<R2SQLDatabasesBindData>();
 
 	// Parameters: secret_name, bucket_name
@@ -132,7 +132,7 @@ struct R2SQLTablesBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> R2SQLTablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<R2SQLTablesBindData>();
 
 	// Parameters: secret_name, bucket_name, namespace (optional)
@@ -175,12 +175,12 @@ static void R2SQLTablesFunction(ClientContext &context, TableFunctionInput &data
 }
 
 void RegisterR2SQLTablesFunction(ExtensionLoader &loader) {
-	TableFunction r2_sql_tables("r2_sql_tables", {LogicalType::VARCHAR, LogicalType::VARCHAR}, R2SQLTablesFunction,
-	                            R2SQLTablesBind);
-
-	// Add optional namespace parameter
-	r2_sql_tables.arguments.push_back(LogicalType::VARCHAR);
-
+	// namespace is optional: register 2- and 3-arg overloads
+	TableFunctionSet r2_sql_tables("r2_sql_tables");
+	r2_sql_tables.AddFunction(
+	    TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, R2SQLTablesFunction, R2SQLTablesBind));
+	r2_sql_tables.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                        R2SQLTablesFunction, R2SQLTablesBind));
 	loader.RegisterFunction(r2_sql_tables);
 }
 
@@ -195,7 +195,7 @@ struct R2SQLDescribeBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> R2SQLDescribeBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<R2SQLDescribeBindData>();
 
 	// Parameters: secret_name, bucket_name, table_name

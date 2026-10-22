@@ -2,7 +2,7 @@
 
 Query Cloudflare D1 databases and R2 SQL Iceberg tables directly from DuckDB with native syntax and automatic query optimization.
 
-[![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.2-blue)](https://duckdb.org)
+[![DuckDB Version](https://img.shields.io/badge/DuckDB-v2.0.0-blue)](https://duckdb.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Community Extension](https://img.shields.io/badge/Community-Extension-orange)](https://duckdb.org/community_extensions/)
 
@@ -258,7 +258,7 @@ SELECT * FROM 'local.parquet' WHERE complex_calculation(...);
 
 ```bash
 # Clone repository
-git clone https://github.com/onnimonni/duckdb-cloudflare.git
+git clone https://github.com/midwork-finds-jobs/duckdb-cloudflare.git
 cd duckdb-cloudflare
 
 # Initialize submodules
@@ -314,8 +314,8 @@ Contributions welcome! Please:
 - **DuckDB Community Extensions**: <https://duckdb.org/community_extensions/>
 - **Cloudflare D1 Docs**: <https://developers.cloudflare.com/d1/>
 - **API Token Guide**: <https://developers.cloudflare.com/fundamentals/api/get-started/create-token/>
-- **GitHub Repository**: <https://github.com/onnimonni/duckdb-cloudflare>
-- **Report Issues**: <https://github.com/onnimonni/duckdb-cloudflare/issues>
+- **GitHub Repository**: <https://github.com/midwork-finds-jobs/duckdb-cloudflare>
+- **Report Issues**: <https://github.com/midwork-finds-jobs/duckdb-cloudflare/issues>
 
 ## License
 

@@ -5,6 +5,7 @@
 #include "r2_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 
 namespace duckdb {
 
@@ -14,6 +15,8 @@ void D1Optimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &pl
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	auto &db = loader.GetDatabaseInstance();
+
 	// Register Cloudflare D1 functions
 	RegisterD1QueryFunction(loader);
 	RegisterD1DatabasesFunction(loader);
@@ -24,7 +27,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterD1SecretType(loader);
 
 	// Register D1 storage extension for ATTACH DATABASE syntax
-	RegisterD1StorageExtension(loader.GetDatabaseInstance());
+	RegisterD1StorageExtension(db);
 
 	// Register d1_scan table function
 	RegisterD1ScanFunction(loader);
@@ -39,10 +42,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterR2SQLSecretType(loader);
 
 	// Register optimizer extension for LIMIT pushdown
-	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	OptimizerExtension optimizer;
 	optimizer.optimize_function = D1Optimizer;
-	config.optimizer_extensions.push_back(std::move(optimizer));
+	OptimizerExtension::Register(DBConfig::GetConfig(db), std::move(optimizer));
 }
 
 void CloudflareExtension::Load(ExtensionLoader &loader) {

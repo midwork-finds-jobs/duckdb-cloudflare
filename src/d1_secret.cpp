@@ -72,14 +72,15 @@ D1Config GetD1ConfigFromSecret(ClientContext &context, const string &secret_name
 
 	// Try to find the secret
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto secret_match = secret_manager.LookupSecret(transaction, secret_name, "d1");
+	// Resolve by explicit name (LookupSecret matches by scope path, not name)
+	auto secret_entry = secret_manager.GetSecretByName(transaction, secret_name);
 
-	if (!secret_match.HasMatch()) {
+	if (!secret_entry || !secret_entry->secret) {
 		throw InvalidInputException("D1 secret '%s' not found. Create it with: CREATE SECRET %s (TYPE d1, ...)",
 		                            secret_name, secret_name);
 	}
 
-	auto &secret = secret_match.GetSecret();
+	auto &secret = *secret_entry->secret;
 	if (secret.GetType() != "d1") {
 		throw InvalidInputException("Secret '%s' is not a D1 secret (type is '%s')", secret_name, secret.GetType());
 	}

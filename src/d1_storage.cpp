@@ -26,7 +26,7 @@ namespace duckdb {
 
 optional_ptr<CatalogEntry> D1Catalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	// For D1, we only support the default schema
-	if (info.schema != DEFAULT_SCHEMA && info.schema != "main") {
+	if (info.SchemaName() != DEFAULT_SCHEMA && info.SchemaName() != "main") {
 		throw CatalogException("D1 catalog only supports 'main' schema");
 	}
 	return nullptr;
@@ -90,7 +90,7 @@ void D1Catalog::CreateViewsForAllTables(ClientContext &context) {
 	auto conn = Connection(db.GetDatabase());
 	for (auto &table : tables) {
 		conn.TableFunction("d1_scan", {Value(table.name), Value(secret_name), Value(database_id)})
-		    ->CreateView(table.name, true, false);
+		    ->CreateView(Identifier(table.name), true, false);
 	}
 }
 
@@ -154,13 +154,11 @@ static unique_ptr<TransactionManager> D1CreateTransactionManager(optional_ptr<St
 // ========================================
 
 void RegisterD1StorageExtension(DatabaseInstance &db) {
-	auto &config = DBConfig::GetConfig(db);
-
-	auto d1_storage = make_uniq<StorageExtension>();
+	auto d1_storage = make_shared_ptr<StorageExtension>();
 	d1_storage->attach = D1AttachFunction;
 	d1_storage->create_transaction_manager = D1CreateTransactionManager;
 
-	config.storage_extensions["d1"] = std::move(d1_storage);
+	StorageExtension::Register(DBConfig::GetConfig(db), "d1", std::move(d1_storage));
 }
 
 } // namespace duckdb
