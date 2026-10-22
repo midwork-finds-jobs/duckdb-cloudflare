@@ -101,3 +101,18 @@ statement error
 ATTACH 'mydb' AS mydb (TYPE d1);
 ----
 D1 attach requires a D1 secret
+
+# ATTACH fallback ignores default-named secrets of another type
+statement ok
+CREATE SECRET cloudflare (TYPE r2_sql, ACCOUNT_ID 'acc', API_TOKEN 'tok');
+
+statement error
+ATTACH 'mydb' AS mydb2 (TYPE d1);
+----
+D1 attach requires a D1 secret
+
+# Explicit SECRET of the wrong type is rejected before any network call
+statement error
+ATTACH 'mydb' AS mydb3 (TYPE d1, SECRET 'my_r2');
+----
+is not a D1 secret
