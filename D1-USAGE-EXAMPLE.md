@@ -7,7 +7,7 @@
 make release GEN=ninja
 
 # Load in DuckDB
-LOAD './build/release/extension/web_archive/web_archive.duckdb_extension';
+LOAD './build/release/extension/cloudflare/cloudflare.duckdb_extension';
 ```
 
 ## Quick Start
@@ -168,7 +168,7 @@ SELECT * FROM d1_query(
 
 ```sql
 -- 1. Load extension
-LOAD './build/release/extension/web_archive/web_archive.duckdb_extension';
+LOAD './build/release/extension/cloudflare/cloudflare.duckdb_extension';
 
 -- 2. Create secret
 CREATE SECRET d1 (

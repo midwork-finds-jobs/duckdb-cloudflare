@@ -452,6 +452,9 @@ static void D1ExecuteScalarFunction(DataChunk &args, ExpressionState &state, Vec
 void RegisterD1ExecuteFunction(ExtensionLoader &loader) {
 	ScalarFunction func("d1_execute", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                    LogicalType::BIGINT, D1ExecuteScalarFunction);
+	// Performs remote writes and can throw
+	func.SetVolatile();
+	func.SetFallible();
 	loader.RegisterFunction(func);
 }
 
